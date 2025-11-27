@@ -1,0 +1,190 @@
+# =====================================================
+# === COMMON BASE =====================================
+# =====================================================
+x-common: &common-template
+  cap_add:
+    - NET_ADMIN
+
+# =====================================================
+# === DOMAIN BASE TEMPLATES (NO VOLUME) ===============
+# =====================================================
+x-domain-templates:
+  uliege_no_volume: &uliege-template
+    <<: *common-template
+    entrypoint: [ "sh", "-c", "ip route del default 2>/dev/null || true && ip route add default via 10.0.1.254 && exec \"$@\"", "--" ]
+
+  gembloux_no_volume: &gembloux-template
+    <<: *common-template
+    entrypoint: [ "sh", "-c", "ip route del default 2>/dev/null || true && ip route add default via 10.0.2.254 && exec \"$@\"", "--" ]
+
+  info_no_volume: &info-template
+    <<: *common-template
+    entrypoint: [ "sh", "-c", "ip route del default 2>/dev/null || true && ip route add default via 10.0.3.254 && exec \"$@\"", "--" ]
+
+
+# =====================================================
+# === DOMAIN + VOLUME TEMPLATES =======================
+# =====================================================
+x-domain-templates-vol:
+  uliege_volume: &uliege-template-volume
+    <<: *uliege-template
+    volumes:
+      - ./dns/uliege/resolv.conf:/etc/resolv.conf
+
+  gembloux_volume: &gembloux-template-volume
+    <<: *gembloux-template
+    volumes:
+      - ./dns/gembloux/resolv.conf:/etc/resolv.conf
+
+  info_volume: &info-template-volume
+    <<: *info-template
+    volumes:
+      - ./dns/info/resolv.conf:/etc/resolv.conf
+
+
+# =====================================================
+# === SERVICE-TYPE TEMPLATES ==========================
+# =====================================================
+x-service-templates:
+  dns: &dns-template
+    image: internetsystemsconsortium/bind9:9.18
+    command: ["named", "-g", "-u", "bind"]
+    restart: always
+
+  mail: &mail-template
+    build:
+      context: ./MailServer
+      dockerfile: Dockerfile
+    restart: unless-stopped
+
+
+# =====================================================
+# === SERVICES ========================================
+# =====================================================
+services:
+
+  # ------------------------
+  # Routers (no resolv.conf)
+  # ------------------------
+  router_info:
+    image: frrouting/frr:latest
+    container_name: router_info
+    privileged: true
+    networks:
+      info_net:
+        ipv4_address: 10.0.3.254
+      uliege_net:
+        ipv4_address: 10.0.1.253
+    volumes:
+      - ./frr/router_info.conf:/etc/frr/frr.conf
+      - ./frr/vtysh.conf:/etc/frr/vtysh.conf
+      - ./frr/daemons:/etc/frr/daemons
+      - ./frr/log:/var/log/frr
+    restart: always
+
+  router_gembloux:
+    image: frrouting/frr:latest
+    container_name: router_gembloux
+    privileged: true
+    networks:
+      uliege_net:
+        ipv4_address: 10.0.1.254
+      gembloux_net:
+        ipv4_address: 10.0.2.254
+    volumes:
+      - ./frr/router_gembloux.conf:/etc/frr/frr.conf
+      - ./frr/vtysh.conf:/etc/frr/vtysh.conf
+      - ./frr/daemons:/etc/frr/daemons
+      - ./frr/log:/var/log/frr
+    restart: always
+
+
+  # ------------------------
+  # DNS Servers
+  # ------------------------
+  dns_uliege:
+    <<: [*uliege-template, *dns-template]
+    container_name: dns_uliege
+    networks:
+      uliege_net:
+        ipv4_address: 10.0.1.2
+    volumes:
+      - ./dns/uliege:/etc/bind
+
+  dns_gembloux:
+    <<: [*gembloux-template, *dns-template]
+    container_name: dns_gembloux
+    networks:
+      gembloux_net:
+        ipv4_address: 10.0.2.2
+    volumes:
+      - ./dns/gembloux:/etc/bind
+
+  dns_info:
+    <<: [*info-template, *dns-template]
+    container_name: dns_info
+    networks:
+      info_net:
+        ipv4_address: 10.0.3.2
+    volumes:
+      - ./dns/info:/etc/bind
+
+
+  # ------------------------
+  # Mail Servers 
+  # ------------------------
+  mail_uliege:
+    <<: [*uliege-template-volume, *mail-template]
+    container_name: mail_uliege
+    networks:
+      uliege_net:
+        ipv4_address: 10.0.1.7
+    command: ["java", "MailServer", "uliege.be", "10"]
+
+  mail_gembloux:
+    <<: [*gembloux-template-volume, *mail-template]
+    container_name: mail_gembloux
+    networks:
+      gembloux_net:
+        ipv4_address: 10.0.2.7
+    command: ["java", "MailServer", "gembloux.uliege.be", "10"]
+
+  mail_info:
+    <<: [*info-template-volume, *mail-template]
+    container_name: mail_info
+    networks:
+      info_net:
+        ipv4_address: 10.0.3.7
+    command: ["java", "MailServer", "info.uliege.be", "10"]
+
+# =====================================================
+# === THUNDERBIRD =====================================
+# =====================================================
+  thunderbird:
+    <<: *info-template-volume
+    image: jlesage/thunderbird:latest
+    container_name: thunderbird
+    networks:
+      info_net:
+        ipv4_address: 10.0.3.10
+    ports:
+      - "5800:5800"
+    command: ["/init"]
+    restart: unless-stopped
+
+# =====================================================
+# === NETWORKS ========================================
+# =====================================================
+networks:
+  uliege_net:
+    ipam:
+      config:
+        - subnet: 10.0.1.0/24
+  gembloux_net:
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24
+  info_net:
+    ipam:
+      config:
+        - subnet: 10.0.3.0/24
