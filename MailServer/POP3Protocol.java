@@ -70,7 +70,8 @@ public class POP3Protocol extends DomainProtocol {
 
                 case "LIST":
                     // List messages
-                    if (!isAuthenticated()) continue;
+                    if (!isAuthenticated()) 
+                        continue;
                     
                     // We must calculate valid count first
                     long validCount = messages.size() - markedForDeletion.size();
@@ -87,7 +88,9 @@ public class POP3Protocol extends DomainProtocol {
 
                 case "RETR":
                     // Retrieve message
-                    if (!isAuthenticated()) continue;
+                    if (!isAuthenticated()) 
+                        continue;
+
                     if (parts.length < 2) {
                         out.println("-ERR Missing argument");
                         break;
@@ -97,7 +100,9 @@ public class POP3Protocol extends DomainProtocol {
 
                 case "DELE":
                     //  Mark message for deletion
-                    if (!isAuthenticated()) continue;
+                    if (!isAuthenticated()) 
+                        continue;
+
                     if (parts.length < 2) {
                         out.println("-ERR Missing argument");
                         break;
