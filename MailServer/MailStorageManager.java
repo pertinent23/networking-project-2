@@ -13,15 +13,21 @@ import java.util.UUID;
 public class MailStorageManager {
     /**
      * Metadata manager for user folders
-     * to store flag and UID
+     * to store flag and UID information
     */
     public static class MetaDataManager {
         private final File meta;
 
         private int lastUID = 0;
+        private boolean isSubscribed = false;
         private String folderUID = UUID.randomUUID().toString() + System.currentTimeMillis();
         private HashMap<Integer, String> metadata = new HashMap<>();
 
+        /**
+         * Constructor
+         * @param username
+         * @param foldername
+        */
         public MetaDataManager(String username, String foldername) {
             Path path = Paths.get(MailSettings.STORAGE_BASE_DIR, username, foldername, MailSettings.META_DATA_FILE);
 
@@ -46,6 +52,8 @@ public class MailStorageManager {
                         this.lastUID = Integer.parseInt(line.split("=")[1]);
                     } else if (line.startsWith("FOLDER_UID=")) {
                         this.folderUID = line.split("=")[1];
+                    } else if (line.startsWith("SUBSCRIBED")) {
+                        this.isSubscribed = true;
                     } else {
                         String[] parts = line.split("=", 2);
                         if (parts.length == 2) {
@@ -59,11 +67,19 @@ public class MailStorageManager {
                 scanner.close();
             } catch (IOException e) {
                 // this schould not happen
-                System.err.println("[Failed to read metadata for " + username + "/" + foldername + "]");
+                System.err.println("[MailStorageManager.java: Failed to read metadata for " + username + "/" + foldername + "]");
             } catch (NumberFormatException e) {
                 // this schould not happen
-                System.err.println("[Invalid metadata format for " + username + "/" + foldername + "]");
+                System.err.println("[MailStorageManager.java: Invalid metadata format for " + username + "/" + foldername + "]");
             }
+        }
+
+        /**
+         * Check if the folder is subscribed.
+         * @return
+        */
+        public boolean isSubscribed() {
+            return isSubscribed;
         }
 
         /**
@@ -76,6 +92,10 @@ public class MailStorageManager {
                 FileWriter writer =  new FileWriter(meta.getPath(), false);
                 writer.write("LAST_UID=" + lastUID + "\n");
                 writer.write("FOLDER_UID=" + folderUID + "\n");
+
+                if (isSubscribed) {
+                    writer.write("SUBSCRIBED\n");
+                }
                 
                 for (var entry : metadata.entrySet()) {
                     writer.write(entry.getKey() + "=" + entry.getValue() + "\n");
@@ -134,6 +154,10 @@ public class MailStorageManager {
                 writer.write("LAST_UID=" + lastUID + "\n");
                 writer.write("FOLDER_UID=" + folderUID + "\n");
                 
+                if (isSubscribed) {
+                    writer.write("SUBSCRIBED\n");
+                }
+                
                 for (var entry : metadata.entrySet()) {
                     writer.write(entry.getKey() + "=" + entry.getValue() + "\n");
                 }
@@ -141,6 +165,28 @@ public class MailStorageManager {
                 writer.close();
             } catch (IOException e) {
                 e.printStackTrace();
+            }
+        }
+
+        public synchronized void setSubscribed(boolean subscribed) {
+            this.isSubscribed = subscribed;
+            try {
+                FileWriter writer =  new FileWriter(meta.getPath(), false);
+                writer.write("LAST_UID=" + lastUID + "\n");
+                writer.write("FOLDER_UID=" + folderUID + "\n");
+                
+                if (subscribed) {
+                    writer.write("SUBSCRIBED\n");
+                }
+
+                for (var entry : metadata.entrySet()) {
+                    writer.write(entry.getKey() + "=" + entry.getValue() + "\n");
+                }
+
+                writer.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+                System.err.println("[MailStorageManager.java: Failed to update subscription status in metadata.]");
             }
         }
 
@@ -169,6 +215,10 @@ public class MailStorageManager {
                 FileWriter writer =  new FileWriter(meta.getPath(), false);
                 writer.write("LAST_UID=" + lastUID + "\n");
                 writer.write("FOLDER_UID=" + folderUID + "\n");
+
+                if (isSubscribed) {
+                    writer.write("SUBSCRIBED\n");
+                }
                 
                 for (var entry : metadata.entrySet()) {
                     writer.write(entry.getKey() + "=" + entry.getValue() + "\n");
@@ -185,12 +235,16 @@ public class MailStorageManager {
          * @param uid
          * @param flags
         */
-        public void setFladgs(int uid, String flags) {
+        public void setFlags(int uid, String flags) {
             metadata.put(uid, flags);
             try {
                 FileWriter writer =  new FileWriter(meta.getPath(), false);
                 writer.write("LAST_UID=" + lastUID + "\n");
                 writer.write("FOLDER_UID=" + folderUID + "\n");
+
+                if (isSubscribed) {
+                    writer.write("SUBSCRIBED\n");
+                }
                 
                 for (var entry : metadata.entrySet()) {
                     writer.write(entry.getKey() + "=" + entry.getValue() + "\n");
@@ -359,6 +413,39 @@ public class MailStorageManager {
         File[] files = inbox.toFile().listFiles((dir, name) -> name.endsWith(".eml"));
         return files != null ? List.of(files) : new LinkedList<>();
     }
+    
+    /**
+     * Retrieve a specific message file for a user.
+     * @param user
+     * @param folderName
+     * @param uid
+     * @return
+    */
+    public static synchronized File getMessageFile(String user, String folderName, int uid) {
+        String username = user.split("@")[0];
+        Path filePath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName, uid + ".eml");
+        if (Files.exists(filePath)) {
+            return filePath.toFile();
+        }
+        return null;
+    }
+
+    /**
+     * Get the message count for a specific user.
+     * @param user
+     * @param folderName
+     * @return
+    */
+    public static synchronized int getMessageCount(String user, String folderName) {
+        String username = user.split("@")[0];
+        Path inbox = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName);
+        if (!Files.exists(inbox)) {
+            return 0;
+        }
+
+        File[] files = inbox.toFile().listFiles((dir, name) -> name.endsWith(".eml"));
+        return files != null ? files.length : 0;
+    }
 
     /**
      * Delete a specific message for a user.
@@ -370,7 +457,7 @@ public class MailStorageManager {
         String username = user.split("@")[0];
         Path filePath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName, filename);
         Files.deleteIfExists(filePath);
-        new MetaDataManager(username, folderName).updateFlag(Integer.parseInt(username.split("\\.")[0]), "\\Deleted", true);
+        new MetaDataManager(username, folderName).updateFlag(Integer.parseInt(filename.split("\\.")[0]), "\\Deleted", true);
     }
 
     /**
@@ -465,6 +552,30 @@ public class MailStorageManager {
     public static void setFlags(String user, String folderName, int uid, String flags) {
         String username = user.split("@")[0];
         MetaDataManager meta = new MetaDataManager(username, folderName);
-        meta.setFladgs(uid, flags);
+        meta.setFlags(uid, flags);
+    }
+
+    /**
+     * Set subscription status for a folder.
+     * @param user
+     * @param folderName
+     * @param subscribed
+    */
+    public static void setSubscribed(String user, String folderName, boolean subscribed) {
+        String username = user.split("@")[0];
+        MetaDataManager meta = new MetaDataManager(username, folderName);
+        meta.setSubscribed(subscribed);
+    }
+
+    /**
+     * Check if a folder is subscribed.
+     * @param user
+     * @param folderName
+     * @return
+    */
+    public static boolean isSubscribed(String user, String folderName) {
+        String username = user.split("@")[0];
+        MetaDataManager meta = new MetaDataManager(username, folderName);
+        return meta.isSubscribed();
     }
 }
