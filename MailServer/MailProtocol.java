@@ -1,38 +1,27 @@
-public enum MailProtocol {
-    SMTP("SMTP"), 
-    IMAP("IMAP"), 
-    POP3("POP3");
+import java.io.*;
+import java.net.Socket;
 
-    private final String name;
+public abstract class MailProtocol {
+    // the client socket
+    protected Socket socket;
 
-    private MailProtocol (String name) {
-        this.name = name;
+    // flux to read from and write to the client
+    protected BufferedReader in;
+    protected PrintWriter out;
+
+    // flux to write raw bytes if needed
+    protected OutputStream rawOut;
+
+    // the domain of thie server
+    protected String serverDomain;
+
+    public MailProtocol(Socket socket, String domain) throws IOException {
+        this.socket = socket;
+        this.serverDomain = domain;
+        this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        this.rawOut = socket.getOutputStream();
+        this.out = new PrintWriter(rawOut, true);
     }
 
-    /**
-     * Get the name of the mail protocol.
-     * @return
-     */
-    public String getName() {
-        return name;
-    }
-
-    /** 
-     * Get the MailProtocol enum from a string name.
-     * @param name
-     * @return
-    */
-    @Override
-    public String toString() {
-        return getName();
-    }
-
-    /**
-     * Check if the name of this protocol equals another protocol's name, ignoring case.
-     * @param otherName
-     * @return
-    */
-    public boolean equalsName(MailProtocol otherName) {
-        return this.name.equalsIgnoreCase(otherName.toString());
-    }
+    public abstract void handle() throws IOException;
 }

@@ -44,27 +44,27 @@ public class MailServer {
         */
         new Thread() {
             public void run() {
-                startService(MailProtocol.SMTP, MailSettings.SMTP_PORT);
+                startService(MailProtocolType.SMTP, MailSettings.SMTP_PORT);
                 System.out.println(">> SMTP service started for: " + DOMAIN);
             }
         }.start();
 
         new Thread() {
             public void run() {
-                startService(MailProtocol.IMAP, MailSettings.IMAP_PORT);
+                startService(MailProtocolType.IMAP, MailSettings.IMAP_PORT);
                 System.out.println(">> IMAP service started for: " + DOMAIN);
             }
         }.start();
 
         new Thread() {
             public void run() {
-                startService(MailProtocol.POP3, MailSettings.POP3_PORT);
+                startService(MailProtocolType.POP3, MailSettings.POP3_PORT);
                 System.out.println(">> POP3 service started for: " + DOMAIN);
             }
         }.start();
     }
 
-    private static void startService(MailProtocol protocol, int port) {
+    private static void startService(MailProtocolType protocol, int port) {
         // Implementation for starting the service
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             System.out.println("[" + protocol + " Server listening on port " + port + "]");

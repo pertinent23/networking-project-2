@@ -2,10 +2,10 @@ import java.net.Socket;
 
 public class MailClient implements Runnable {
     protected Socket clientSocket;
-    protected MailProtocol protocol;
+    protected MailProtocolType protocol;
     protected String domain;
 
-    public MailClient(Socket clientSocket, MailProtocol protocol, String domain) {
+    public MailClient(Socket clientSocket, MailProtocolType protocol, String domain) {
         this.clientSocket = clientSocket;
         this.protocol = protocol;
         this.domain = domain;

@@ -9,7 +9,7 @@ import java.util.regex.Pattern;
  * IMAP Protocol handler for mail server
  * Handles basic IMAP commands
 */
-public class IMAPProtocol extends DomainProtocol {
+public class IMAPProtocol extends MailProtocol {
     private String currentUser = null;
     private String currentMailbox = null;
     private int msn = 1;

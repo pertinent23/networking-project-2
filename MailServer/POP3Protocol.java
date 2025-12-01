@@ -10,7 +10,7 @@ import java.util.List;
  * Handles basic POP3 commands specified in the assignment
  *  
 */
-public class POP3Protocol extends DomainProtocol {
+public class POP3Protocol extends MailProtocol {
     private String currentUser = null;
     private List<File> messages = List.of();
     private final String currentFolder = "INBOX";

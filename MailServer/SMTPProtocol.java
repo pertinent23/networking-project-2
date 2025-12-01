@@ -27,7 +27,7 @@ import java.net.Socket;
  * | Remote SMTP Srv  |
  * +------------------+
 */
-public class SMTPProtocol extends DomainProtocol {
+public class SMTPProtocol extends MailProtocol {
     // Current transaction state
     private String sender = "";
     private String recipient = "";
