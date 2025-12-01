@@ -5,13 +5,34 @@ import java.io.PrintWriter;
 import java.net.Socket;
 
 /**
- * SMTP Protocol handler for mail server
- * Handles basic SMTP commands
- */
+ * SMTP Protocol Handler
+ * <p>
+ * This class implements the server-side SMTP logic (RFC 5321).
+ * It handles incoming email transmission requests and acts as an
+ * MTA (Mail Transfer Agent) to either deliver locally or relay remotely.
+ * +--------+      SMTP       +--------------+
+ * | Client | --------------> | SMTPProtocol |
+ * +--------+                 +------+-------+
+ * |
+ * +----------------+----------------+
+ * |                                 |
+ * [Domain Match?]                     [External Domain]
+ * |                                 |
+ * +--------v---------+             +---------v---------+
+ * | Local Delivery   |             |    Relaying       |
+ * | (Save to Disk)   |             | (MailDNSClient)   |
+ * +------------------+             +---------+---------+
+ * |
+ * +--------v---------+
+ * | Remote SMTP Srv  |
+ * +------------------+
+*/
 public class SMTPProtocol extends DomainProtocol {
-    // state variables to track SMTP session
+    // Current transaction state
     private String sender = "";
     private String recipient = "";
+    
+    // Buffer to accumulate message data (Body + Headers) during DATA phase
     private StringBuilder dataBuffer = new StringBuilder();
 
     public SMTPProtocol(Socket socket, String domain) throws IOException {
@@ -19,245 +40,326 @@ public class SMTPProtocol extends DomainProtocol {
     }
 
     /**
-     * Handles the SMTP session with the connected client
-    */
+     * Main Protocol Loop
+     * Implements the SMTP State Machine.
+     * State Machine Diagram:
+     * (Connection Est.)
+     * |
+     * v
+     * +------+------+
+     * | COMMAND MODE| <----qt-----+
+     * +------+------+             |
+     * | DATA Command              |
+     * v                           |
+     * +------+------+             |
+     * |  DATA MODE  |             |
+     * | (Read Body) |             |
+     * +------+------+             |
+     * | <CRLF>.<CRLF>             |
+     * v                           |
+     * [Process Email] ------------+
+     * </pre>
+     */
     @Override
     public void handle() throws IOException {
-        out.println("220 " + serverDomain + " Simple Mail Transfer Service Ready");
+        // Step 1: Send initial greeting (Service Ready)
+        sendResponse("220 " + serverDomain + " Simple Mail Transfer Service Ready");
         
         String line;
         boolean dataMode = false;
         
         while ((line = in.readLine()) != null) {
-            // 1. DATA MODE HANDLER
+            
+            // =================================================================================
+            // PHASE 1: DATA MODE (Reading Email Content)
+            // =================================================================================
             if (dataMode) {
+                // End of data sequence: <CRLF>.<CRLF>
                 if (line.equals(".")) {
                     dataMode = false;
                     processEmail();
                 } else {
-                    // Start with . handling (Transparency)
-                    if (line.startsWith(".")) dataBuffer.append("."); 
-                    dataBuffer.append(line).append("\r\n");
+                    /*
+                     * --- TRANSPARENCY / DOT-STUFFING ---
+                     * If a line starts with a period, the client adds an extra period.
+                     * We must strip it here, unless we want to store it "stuffed".
+                     * Here, we keep it simple and store as received (or strip if needed).
+                     */
+                    if (line.startsWith(".")) {
+                        // In a full implementation, line = line.substring(1);
+                        dataBuffer.append(line).append("\r\n");
+                    } else {
+                        dataBuffer.append(line).append("\r\n");
+                    }
                 }
-                continue;
+                continue; // Skip command parsing while in data mode
             }
 
-            // 2. COMMAND PARSING
-            // We need to extract the "Verb" for the switch statement
+            // =================================================================================
+            // PHASE 2: COMMAND MODE (Parsing SMTP Verbs)
+            // =================================================================================
             String upperLine = line.trim().toUpperCase();
             String command = "";
 
+            // Identify the verb
             if (upperLine.startsWith("MAIL FROM:")) command = "MAIL";
             else if (upperLine.startsWith("RCPT TO:")) command = "RCPT";
-            else if (upperLine.startsWith("HELO")) command = "HELO";
-            else command = upperLine; // For DATA, QUIT
+            else if (upperLine.startsWith("HELO") || upperLine.startsWith("EHLO")) command = "HELO";
+            else command = upperLine; 
 
-            // 3. COMMAND SWITCH
             switch (command) {
                 case "HELO":
-                    // Format: HELO client.domain.com
-                    out.println("250 " + serverDomain);
+                    sendResponse("250 " + serverDomain);
                     break;
 
                 case "MAIL":
-                    // Format: MAIL FROM: <address>
                     try {
-                        // Robust parsing: find the index of ':' to support spaces or no spaces
                         int colonIndex = line.indexOf(':');
                         if (colonIndex > -1) {
-                            sender = line.substring(colonIndex + 1).trim().replace("<", "").replace(">", "");
-                            out.println("250 OK");
+                            sender = extractEmail(line.substring(colonIndex + 1));
+                            sendResponse("250 OK");
                         } else {
-                            out.println("501 Syntax error in parameters or arguments");
+                            sendResponse("501 Syntax error in parameters");
                         }
                     } catch (Exception e) {
-                        out.println("501 Syntax error");
+                        sendResponse("501 Syntax error");
                     }
                     break;
 
                 case "RCPT":
-                    // Format: RCPT TO: <address>
+                    // Define Recipient (Can be called multiple times in standard SMTP, 
+                    // but here we simplify to single recipient logic)
                     try {
                         int colonIndex = line.indexOf(':');
                         if (colonIndex > -1) {
-                            recipient = line.substring(colonIndex + 1).trim().replace("<", "").replace(">", "");
-                            out.println("250 OK");
+                            recipient = extractEmail(line.substring(colonIndex + 1));
+                            sendResponse("250 OK");
                         } else {
-                            out.println("501 Syntax error");
+                            sendResponse("501 Syntax error");
                         }
                     } catch (Exception e) {
-                        out.println("501 Syntax error");
+                        sendResponse("501 Syntax error");
                     }
                     break;
 
                 case "DATA":
-                    out.println("354 End data with <CRLF>.<CRLF>");
+                    // Trigger transition to DATA MODE
+                    // 354 is the code to tell client "Go ahead, end with ."
+                    sendResponse("354 End data with <CRLF>.<CRLF>");
                     dataMode = true;
-                    dataBuffer.setLength(0); // Reset buffer
+                    dataBuffer.setLength(0); 
                     break;
 
                 case "QUIT":
-                    out.println("221 Bye");
-                    return; // Break loop and close connection
+                    // Close connection
+                    sendResponse("221 Bye");
+                    return; 
+
+                case "RSET":
+                    // Reset transaction state without dropping connection
+                    sender = "";
+                    recipient = "";
+                    dataBuffer.setLength(0);
+                    sendResponse("250 OK");
+                    break;
 
                 default:
-                    out.println("500 Unrecognized command");
+                    sendResponse("500 Unrecognized command");
                     break;
             }
         }
     }
 
     /**
-     * Process the received email data 
+     * Routing Logic: Local Delivery vs. Relaying
+     * Analyzes the recipient domain to decide the path.
     */
     private void processEmail() {
+        if (recipient == null || !recipient.contains("@")) {
+            sendResponse("550 Invalid recipient");
+            return;
+        }
+
         String targetDomain = recipient.substring(recipient.indexOf('@') + 1);
         
-        if (targetDomain.equalsIgnoreCase(serverDomain)) {
-            // --- LOCAL DELIVERY ---
+        // Check if the email is for this server
+        if (targetDomain.equalsIgnoreCase(serverDomain) || targetDomain.equals("localhost")) {
+            // --- LOCAL DELIVERY STRATEGY ---
             try {
-                // Prepend headers for local storage so POP3/IMAP clients can display them
-                StringBuilder finalContent = new StringBuilder("From: ")
-                        .append(sender).append("\r\nTo: ")
-                        .append(recipient).append("\r\n")
-                        .append(dataBuffer.toString());
+                // Construct final email content with envelope headers
+                StringBuilder finalContent = new StringBuilder();
+                finalContent.append("Return-Path: <").append(sender).append(">\r\n");
+                finalContent.append("Delivered-To: ").append(recipient).append("\r\n");
+                finalContent.append(dataBuffer.toString());
 
+                // Save to local disk via Manager
                 MailStorageManager.saveEmail(recipient, "INBOX", finalContent.toString());
-                out.println("250 OK Message accepted for delivery");
+                sendResponse("250 OK Message accepted for delivery");
             } catch (IOException e) {
                 e.printStackTrace();
-                out.println("451 Requested action aborted: local error");
+                sendResponse("451 Requested action aborted: local error");
             }
         } else {
-            // --- RELAYING (FORWARDING) ---
-            System.out.println("Relaying email to remote domain: " + targetDomain);
+            // --- RELAYING STRATEGY ---
+            // Security Note: In a real world scenario, you must check if 'sender' is authenticated
+            // or if 'sender' belongs to this domain. Otherwise, you are an "Open Relay".
+            
+            System.out.println("[SMTPProtocol.java: Relaying email to remote domain: " + targetDomain + "]");
             try {
-                String mxHost = resolveMX(targetDomain);
+                // 1. DNS Resolution (Find where to send)
+                String mxHost = MailDNSClient.resolveMX(targetDomain);
                 
+                // Fallback : If no MX record found, treat domain as A record (Host)
                 if (mxHost == null) {
-                    out.println("550 No mail server found for domain " + targetDomain);
-                    return;
+                    System.out.println("[SMTPProtocol.java: No MX record found, falling back to A record: " + targetDomain + "]");
+                    mxHost = targetDomain;
                 }
 
+                // 2. SMTP Forwarding
                 boolean success = sendToRemoteServer(mxHost, sender, recipient, dataBuffer.toString());
 
                 if (success) {
-                    out.println("250 OK Message relayed to " + mxHost);
+                    sendResponse("250 OK Message relayed to " + mxHost);
                 } else {
-                    out.println("451 Failed to relay message to remote server");
+                    sendResponse("451 Failed to relay message to remote server");
                 }
 
             } catch (Exception e) {
                 e.printStackTrace();
-                out.println("451 Error during forwarding");
+                sendResponse("451 Error during forwarding");
             }
         }
     }
 
     /**
-     * Resolves the MX record for the given domain using 'dig' command
-    */
-    private String resolveMX(String domain) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("dig", "+short", "MX", domain);
-            Process process = pb.start();
-
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String line;
-            String bestMx = null;
-            int bestPriority = Integer.MAX_VALUE;
-
-            while ((line = reader.readLine()) != null) {
-                if (line.isEmpty()) continue;
-                
-                String[] parts = line.split("\\s+");
-                if (parts.length >= 2) {
-                    try {
-                        int priority = Integer.parseInt(parts[0]);
-                        String host = parts[1];
-                        if (priority < bestPriority) {
-                            bestPriority = priority;
-                            bestMx = host;
-                        }
-                    } catch (NumberFormatException e) {
-                        bestMx = parts[0]; 
-                    }
-                }
-            }
-            
-            if (bestMx != null && bestMx.endsWith(".")) {
-                bestMx = bestMx.substring(0, bestMx.length() - 1);
-            }
-            
-            // Fallback to A record if no MX
-            if (bestMx == null) {
-                return domain; 
-            }
-
-            return bestMx;
-
-        } catch (IOException e) {
-            System.err.println("DNS Lookup failed: " + e.getMessage());
-            return null;
-        }
-    }
-
-    /**
-     * Sends the email to the remote SMTP server
+     * Acts as an SMTP Client to forward the email to another server.
+     * SMTP Relay Sequence:
+     * 
+     * Our Server            Remote Server
+     * |                       |
+     * |---(TCP Connect)------>|
+     * |<-------- 220 ---------|
+     * |--- EHLO mydomain ---->|
+     * |<-------- 250 ---------|
+     * |--- MAIL FROM: ... --->|
+     * |<-------- 250 ---------|
+     * |---- RCPT TO: ... ---->|
+     * |<-------- 250 ---------|
+     * |------- DATA --------->|
+     * |<-------- 354 ---------|
+     * |---- (Send Body) ----->|
+     * |-------- . ----------->|
+     * |<-------- 250 ---------|
+     * |------- QUIT --------->|
+     * 
+     * @param mxHost The hostname of the remote mail server (from DNS).
+     * @param sender The envelope sender.
+     * @param recipient The envelope recipient.
+     * @param data The content of the email.
+     * @return true if relayed successfully.
      */
     private boolean sendToRemoteServer(String mxHost, String sender, String recipient, String data) {
+        // Standard SMTP port is 25. 
+        // Note: Many ISPs block outgoing port 25 to prevent spam.
         try (Socket socket = new Socket(mxHost, 25);
             BufferedReader remoteIn = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter remoteOut = new PrintWriter(socket.getOutputStream(), true)) {
 
-            if (!checkResponse(remoteIn, "220")) 
+            // 1. Wait for Greeting
+            if (!expect(remoteIn, "220")) {
                 return false;
-
-            remoteOut.println("HELO " + serverDomain);
-            if (!checkResponse(remoteIn, "250")) 
-                return false;
-
-            remoteOut.println("MAIL FROM: <" + sender + ">");
-            if (!checkResponse(remoteIn, "250")) 
-                return false;
-
-            remoteOut.println("RCPT TO: <" + recipient + ">");
-            
-            // 250 OK or 251 User not local
-            String rcptResp = remoteIn.readLine();
-            if (rcptResp == null || (!rcptResp.startsWith("250") && !rcptResp.startsWith("251"))) 
-                return false;
-
-            remoteOut.println("DATA");
-            if (!checkResponse(remoteIn, "354")) 
-                return false;
-
-            // Send Headers
-            remoteOut.println("From: " + sender);
-            remoteOut.println("To: " + recipient);
-            
-            // Ensure blank line between headers and body
-            if(!data.startsWith("\r\n") && !data.startsWith("\n")) {
-                remoteOut.println(); 
             }
 
-            remoteOut.print(data);
-            remoteOut.println("\r\n."); 
-            
-            if (!checkResponse(remoteIn, "250")) 
-                return false;
+            // 2. Handshake (EHLO preferred, fallback to HELO)
+            sendCmd(remoteOut, "EHLO " + serverDomain);
+            if (!expect(remoteIn, "250")) {
+                sendCmd(remoteOut, "HELO " + serverDomain);
+                if (!expect(remoteIn, "250")) {
+                    return false;
+                }
+            }
 
-            remoteOut.println("QUIT");
+            // 3. Envelope Sender
+            sendCmd(remoteOut, "MAIL FROM:<" + sender + ">");
+            if (!expect(remoteIn, "250")) {
+                return false;
+            }
+
+            // 4. Envelope Recipient
+            sendCmd(remoteOut, "RCPT TO:<" + recipient + ">");
+            // Remote server might return 251 (User not local; will forward), which is also valid success.
+            String resp = remoteIn.readLine();
+            if (resp == null || (!resp.startsWith("250") && !resp.startsWith("251"))) {
+                return false;
+            }
+
+            // 5. Data Transmission
+            sendCmd(remoteOut, "DATA");
+            if (!expect(remoteIn, "354")) {
+                return false;
+            }
+
+            // Important: We must ensure headers are present.
+            // If the original data doesn't have headers, we add basic ones.
+            if (!data.toLowerCase().startsWith("from:")) {
+                remoteOut.print("From: " + sender + "\r\n");
+                remoteOut.print("To: " + recipient + "\r\n");
+            }
+            
+            // Send body content
+            // NOTE: Technically, we should "dot-stuff" here (replace "\n." with "\n..") 
+            // to prevent premature ending.
+            remoteOut.print(data);
+            
+            // End of Data Indicator (<CRLF>.<CRLF>)
+            sendCmd(remoteOut, "\r\n."); 
+            
+            if (!expect(remoteIn, "250")) return false;
+
+            // 6. Termination
+            sendCmd(remoteOut, "QUIT");
             return true;
         } catch (IOException e) {
-            System.err.println("Failed to connect to remote server " + mxHost + ": " + e.getMessage());
+            System.err.println("Failed to connect to relay host " + mxHost + ": " + e.getMessage());
             return false;
         }
     }
 
-    // Helper to reduce duplicated code in sendToRemoteServer
-    private boolean checkResponse(BufferedReader in, String expectedCode) throws IOException {
+    // ==========================================================
+    //                   HELPER METHODS
+    // ==========================================================
+
+    /**
+     * Sends a raw response to the connected client.
+     * Enforces CRLF (\r\n) line endings as per RFC 5321.
+    */
+    private void sendResponse(String msg) {
+        out.print(msg + "\r\n");
+        out.flush();
+    }
+
+    /**
+     * Sends a command to a remote server.
+     * Trims input and appends CRLF.
+     */
+    private void sendCmd(PrintWriter out, String cmd) {
+        out.print(cmd.trim() + "\r\n");
+        out.flush();
+    }
+
+    /**
+     * Reads a line from the remote server and checks if it starts with the expected code.
+     */
+    private boolean expect(BufferedReader in, String code) throws IOException {
         String line = in.readLine();
-        return line != null && line.startsWith(expectedCode);
+        // System.out.println("Debug Remote Response: " + line); 
+        return line != null && line.startsWith(code);
+    }
+
+    /**
+     * Utility to clean email addresses (remove < and >).
+     */
+    private String extractEmail(String raw) {
+        return raw.trim().replace("<", "").replace(">", "");
     }
 }
