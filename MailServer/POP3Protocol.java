@@ -3,18 +3,17 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.Socket;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
  * POP3 Protocol handler for mail server
  * Handles basic POP3 commands specified in the assignment
+ *  
 */
 public class POP3Protocol extends DomainProtocol {
     private String currentUser = null;
-    private List<File> messages;
-    // We keep track of deleted messages by index to handle the UPDATE state
-    private List<Integer> markedForDeletion = new ArrayList<>();
+    private List<File> messages = List.of();
+    private final String currentFolder = "INBOX";
 
     public POP3Protocol(Socket socket, String domain) throws IOException {
         super(socket, domain);
@@ -22,102 +21,111 @@ public class POP3Protocol extends DomainProtocol {
 
     @Override
     public void handle() throws IOException {
-        out.println("+OK POP3 server ready");
+        sendOk("POP3 server ready");
 
         String line;
         while ((line = in.readLine()) != null) {
-            String[] parts = line.split(" ");
+            String[] parts = line.split(" ", 2);
             String cmd = parts[0].toUpperCase();
 
-            // Using switch as requested
             switch (cmd) {
                 case "USER":
                     if (parts.length < 2) {
-                        out.println("-ERR User required");
+                        sendErr("User required");
                     } else {
                         currentUser = parts[1];
-                        out.println("+OK User accepted");
+                        sendOk("User accepted");
                     }
+
                     break;
 
                 case "PASS":
                     if (parts.length < 2) {
-                        out.println("-ERR Password required");
+                        sendErr("Password required");
                     } else if (MailStorageManager.authenticate(currentUser, parts[1], serverDomain)) {
-                        out.println("+OK Logged in");
-                        messages = MailStorageManager.getMessages(currentUser, "INBOX");
-                        markedForDeletion.clear(); // Reset deletion list on new login
+                        sendOk("Logged in");
+                        messages = MailStorageManager.getMessages(currentUser, currentFolder);
                     } else {
-                        out.println("-ERR Auth failed");
+                        sendErr("Auth failed");
                         currentUser = null;
                     }
                     break;
 
                 case "STAT":
-                    // Show count and total size
-                    if (!isAuthenticated()) continue;
+                    if (!isAuthenticated()) {
+                        continue;
+                    }
+
                     long totalSize = 0;
                     int count = 0;
                     
                     for (int i = 0; i < messages.size(); i++) {
-                        if (!markedForDeletion.contains(i)) {
+                        if (!isMakedForDeletion(messages.get(i))) {
                             totalSize += messages.get(i).length();
                             count++;
                         }
                     }
-                    out.println("+OK " + count + " " + totalSize);
+                    sendOk(count + " " + totalSize);
                     break;
 
                 case "LIST":
-                    // List messages
-                    if (!isAuthenticated()) 
+                case "UIDL":
+                     if (!isAuthenticated()) {
                         continue;
-                    
-                    // We must calculate valid count first
-                    long validCount = messages.size() - markedForDeletion.size();
-                    out.println("+OK " + validCount + " messages");
-                    
-                    for (int i = 0; i < messages.size(); i++) {
-                        if (!markedForDeletion.contains(i)) {
-                            // POP3 indexes start at 1
-                            out.println((i + 1) + " " + messages.get(i).length());
-                        }
                     }
-                    out.println(".");
+                    
+                    handleList(cmd.equals("UIDL"));
                     break;
 
                 case "RETR":
-                    // Retrieve message
-                    if (!isAuthenticated()) 
+                    if (!isAuthenticated()) {
                         continue;
+                    }
 
                     if (parts.length < 2) {
-                        out.println("-ERR Missing argument");
+                        sendErr("Missing argument");
                         break;
                     }
+
                     handleRetr(parts[1]);
                     break;
 
                 case "DELE":
-                    //  Mark message for deletion
-                    if (!isAuthenticated()) 
+                    if (!isAuthenticated()) {
                         continue;
+                    }
 
                     if (parts.length < 2) {
-                        out.println("-ERR Missing argument");
+                        sendErr("Missing argument");
                         break;
                     }
+
                     handleDele(parts[1]);
+                    break;
+                
+                case "RSET":
+                    if (!isAuthenticated()) {
+                        continue;
+                    }
+
+                    handleReset();
+                    break;
+                
+                case "NOOP":
+                    if (!isAuthenticated()) {
+                        continue;
+                    }
+
+                    sendOk("Noop");
                     break;
 
                 case "QUIT":
-                    // Update state: remove deleted messages
                     processDeletions();
-                    out.println("+OK Bye");
-                    return; // Break the loop and close connection
+                    sendOk("Bye");
+                    return;
 
                 default:
-                    out.println("-ERR Unknown command");
+                    sendErr("Unknown command");
                     break;
             }
         }
@@ -129,10 +137,36 @@ public class POP3Protocol extends DomainProtocol {
     */
     private boolean isAuthenticated() {
         if (currentUser == null) {
-            out.println("-ERR Authenticate first");
+            sendErr("Authenticate first");
             return false;
         }
         return true;
+    }
+
+    /**
+     * use for list message in the current folder [INBOX]
+     * @param isUID equal true if the command UIDL is used
+    */
+    private void handleList(boolean isUID) {
+        int counter = 0;
+        StringBuilder response = new StringBuilder();
+                    
+        for (int i = 0; i < messages.size(); i++) {
+            if (!isMakedForDeletion(messages.get(i))) {
+                if (!isUID) {
+                    response.append((i+1) + " " + messages.get(i).length() + "\r\n");
+                } else {
+                    response.append((i+1) + " " + getUidFromFile(messages.get(i)) + "\r\n");
+                }
+            } else {
+                counter++;
+            }
+        }
+
+        sendOk((messages.size() - counter) + " messages");
+        out.print(response.toString());
+        out.print(".\r\n");
+        out.flush();
     }
 
     /**
@@ -141,33 +175,34 @@ public class POP3Protocol extends DomainProtocol {
     */
     private void handleRetr(String arg) {
         try {
-            int msgIndex = Integer.parseInt(arg) - 1; // POP3 is 1-based
-
-            if (isInvalidIndex(msgIndex)) {
-                out.println("-ERR Message not found or deleted");
+            int uid = Integer.parseInt(arg) - 1;  // Message index
+            File message = messages.get(uid);
+           
+            if (isMakedForDeletion(message)) {
+                sendErr("Message not found or deleted");
                 return;
             }
-
-            File f = messages.get(msgIndex);
             
-            out.println("+OK " + f.length() + " octets");
+            sendOk(message.length() + " octets");
 
-            try (BufferedReader fileReader = new BufferedReader(new FileReader(f))) {
-                String fileLine;
-                while ((fileLine = fileReader.readLine()) != null) {
-                    // Byte Stuffing [Standard POP3 requirement]
-                    if (fileLine.startsWith(".")) {
+            try (BufferedReader fileReader = new BufferedReader(new FileReader(message))) {
+                String line;
+                while ((line = fileReader.readLine()) != null) {
+                    if (line.startsWith(".")) {
                         out.print(".");
                     }
-                    out.println(fileLine);
+                    out.print(line.concat("\r\n"));
                 }
             } catch (IOException e) {
-                System.err.println("Error reading file: " + f.getName());
+                System.err.println("[POP3Protocol.java: Error reading file: " + message.getName() + "]");
+            } finally {
+                out.print(".\r\n");
             }
-            out.println(".");
             
         } catch (NumberFormatException e) {
-            out.println("-ERR Invalid message number");
+            sendErr("Invalid message number");
+        } catch (IndexOutOfBoundsException e) {
+            sendErr("Message not found or deleted");
         }
     }
 
@@ -177,45 +212,105 @@ public class POP3Protocol extends DomainProtocol {
     */
     private void handleDele(String arg) {
         try {
-            int msgIndex = Integer.parseInt(arg) - 1;
+            int uid = Integer.parseInt(arg) - 1;  // Message index
+            File message = messages.get(uid);
+           
+            if (isMakedForDeletion(message)) {
+                sendErr("Message not found or deleted");
+                return;
+            }
 
-            if (isInvalidIndex(msgIndex)) {
-                out.println("-ERR Message already deleted or invalid");
+            List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, getUidFromFile(message));
+
+            if (flags.contains("\\Deleted")) {
+                sendErr("Message already deleted or invalid");
             } else {
-                markedForDeletion.add(msgIndex);
-                out.println("+OK Message marked for deletion");
+                MailStorageManager.updateFlag(currentUser, currentFolder, getUidFromFile(message), "\\Deleted", true);
+                sendOk("Message marked for deletion");
             }
         } catch (NumberFormatException e) {
-            out.println("-ERR Invalid message number");
+            sendErr("Invalid message number");
+        } catch (IndexOutOfBoundsException e) {
+            sendErr("Message not found or deleted");
         }
+    }
+
+    /**
+     * If the user want to reset the deletion
+     * before quit we can reset
+     * 
+    */
+    private void handleReset() {
+        messages.forEach(message -> {
+            if (message.exists()) {
+                List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, getUidFromFile(message));
+
+                if (flags.contains("\\Deleted")) {
+                    MailStorageManager.updateFlag(currentUser, currentFolder, getUidFromFile(message), "\\Deleted", false);
+                }
+            }
+        });
+
+        sendOk("Messages has been reseted");
     }
 
     /**
      * Process deletions at QUIT command
-     *
+     * 
     */
     private void processDeletions() {
-        if (currentUser != null && !markedForDeletion.isEmpty()) {
-            for (int index : markedForDeletion) {
-                File f = messages.get(index);
-                if (f.exists()) {
-                    // Assuming StorageManager has a delete method
+        messages.forEach(message -> {
+            if (message.exists()) {
+                List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, getUidFromFile(message));
+
+                if (flags.contains("\\Deleted")) {
                     try {
-                        MailStorageManager.deleteMessageFile(f);
+                        MailStorageManager.deleteMessageFile(message);
                     } catch (IOException e) {
-                        System.err.println("[Failed to delete message: " + f.getName() + "]");
+                        System.err.println("[POP3Protocol.java: Failed to delete message: " + message.getName() + "]");
                     }
                 }
             }
+        });
+    }
+
+    private boolean isMakedForDeletion(File message) {
+        int uid = getUidFromFile(message);
+        List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, uid);
+        return flags.contains("\\Deleted");
+    }
+
+    /**
+     * Extracts UID from filename
+     * @param f
+     * @return
+    */
+    private int getUidFromFile(File f) {
+        try {
+            // we assume filename is like "123.eml"
+            return Integer.parseInt(f.getName().split("[^0-9]")[0]);
+        } catch (Exception e) {
+            return 0;
         }
     }
 
     /**
-     * Check if the given message index is invalid or marked for deletion
-     * @param index
-     * @return
+     * 
+     * @param tag
+     * @param msg
     */
-    private boolean isInvalidIndex(int index) {
-        return index < 0 || index >= messages.size() || markedForDeletion.contains(index);
+    private void sendErr(String msg) {
+        out.print("-ERR " + msg + "\r\n");
+        out.flush();
+    }
+
+    /**
+     * 
+     * @param tag
+     * @param msg
+    */
+    private void sendOk(String msg) {
+        out.print("+OK " + msg + "\r\n");
+        out.flush();
     }
 }
