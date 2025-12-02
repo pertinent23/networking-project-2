@@ -15,7 +15,7 @@ public class MailClient implements Runnable {
     public void run() {
         // Handle client connection based on the protocol
         try {
-            System.out.println("[New connection for " + protocol + " from " + clientSocket.getInetAddress() + "]");
+            System.out.println("[MailClient.java: New connection for " + protocol + " from " + clientSocket.getInetAddress() + "]");
             switch (protocol) {
                 case SMTP:
                     new SMTPProtocol(clientSocket, domain).handle();
@@ -28,7 +28,7 @@ public class MailClient implements Runnable {
                     break;
             }
         } catch (Exception e) {
-            System.err.println("[Error handling client: " + e.getMessage() + "]");
+            System.err.println("[MailClient.java: Error handling client: " + e.getMessage() + "]");
         } finally {
             try {
                 clientSocket.close();

@@ -8,6 +8,8 @@ public abstract class MailSettings {
     public static final String STORAGE_BASE_DIR = "storage";
     public static final String META_DATA_FILE = ".metadata";
 
+    public static final String DNS_CONFIGS_FILE = "/etc/resolv.conf";
+
     public static final Map<String, String> USERS = Map.of(
         "dcd", "password",
         "vj", "password"

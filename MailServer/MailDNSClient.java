@@ -6,137 +6,180 @@ import java.util.Random;
 /**
  * MailDNSClient
  * A raw UDP DNS client specifically designed to resolve MX (Mail Exchange) records.
- * * Compliant with RFC 1035 (Domain Names - Implementation and Specification).
+ * Compliant with RFC 1035 (Domain Names - Implementation and Specification).
+ *
+ * This implementation manually constructs DNS packets and parses responses bit-by-bit
+ * to function without external libraries (JNDI/DNSJava) as required by the project guidelines.
+ *
+ * NETWORK ARCHITECTURE CONTEXT:
+ * -----------------------------
+ * In the Docker environment, this client reads /etc/resolv.conf to find the
+ * local DNS container IP (e.g., 10.0.1.2) instead of defaulting to public DNS.
  */
 public class MailDNSClient {
+    
+    // --- CONSTANTS ---
     private static final int DNS_PORT = 53;
-    private static final int TYPE_MX = 15;
-    private static final int CLASS_IN = 1;
-    private static final int MAX_PACKET_SIZE = 512; // Standard UDP DNS packet size limit
+    private static final int TYPE_MX = 15;  // Mail Exchange Record Type
+    private static final int CLASS_IN = 1;  // Internet Class
+    
+    // Standard UDP DNS Packet Limit (RFC 1035).
+    // Responses larger than 512 bytes are truncated (TC flag), forcing TCP.
+    // For this simulation, 512 bytes is sufficient for basic MX queries.
+    private static final int MAX_PACKET_SIZE = 512; 
 
     /**
      * Resolves the MX record for a domain using raw UDP.
+     * * FLOW:
+     * 1. Detect DNS Server IP (from OS config).
+     * 2. Construct Query Packet (Header + Question).
+     * 3. Send over UDP.
+     * 4. Receive Response.
+     * 5. Parse Response (Header -> Skip Question -> Read Answers).
+     *
      * @param domain The domain to resolve (e.g., "uliege.be")
-     * @return The mail server hostname with the highest priority (lowest preference number), or null if failed.
+     * @return The mail server hostname with the highest priority (lowest preference), or null.
      */
     public static String resolveMX(String domain) {
         DatagramSocket socket = null;
         try {
-            // 1. Determine which DNS server to use (from OS configuration or fallback)
+            // 1. Identify the DNS Server from /etc/resolv.conf
+            // Necessary because Docker containers use internal DNS IPs (e.g., 127.0.0.11 or 10.x.x.x).
             String dnsServer = getSystemDnsServer();
             InetAddress dnsAddress = InetAddress.getByName(dnsServer);
-
-            socket = new DatagramSocket();
-            socket.setSoTimeout(5000); // 5-second timeout to prevent hanging
-
-            // 2. Build the DNS Query Packet
-            // We generate a random Transaction ID to match the response later
-            int transactionID = new Random().nextInt(65535/2);
-            byte[] requestData = buildQuery(domain, transactionID);
             
-            DatagramPacket sendPacket = new DatagramPacket(requestData, requestData.length, dnsAddress, DNS_PORT);
-            
-            // 3. Send Request
-            socket.send(sendPacket);
-            
-            // 4. Receive Response
-            byte[] buffer = new byte[MAX_PACKET_SIZE];
-            DatagramPacket receivePacket = new DatagramPacket(buffer, buffer.length);
-            socket.receive(receivePacket);
+            // Retry Mechanism: UDP is unreliable. We try up to 3 times before giving up.
+            int maxRetries = 3;
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    socket = new DatagramSocket();
+                    socket.setSoTimeout(2000); // 2 seconds timeout to avoid hanging
 
-            // 5. Parse Response to extract MX record
-            return parseResponse(buffer, receivePacket.getLength(), transactionID);
+                    // 2. Build the DNS Query Packet
+                    // We generate a random ID to match the request with the response.
+                    int transactionID = new Random().nextInt(65535);
+                    byte[] requestData = buildQuery(domain, transactionID);
+                    
+                    DatagramPacket sendPacket = new DatagramPacket(requestData, requestData.length, dnsAddress, DNS_PORT);
+                    
+                    // 3. Send Request
+                    socket.send(sendPacket);
+                    
+                    // 4. Receive Response
+                    byte[] buffer = new byte[MAX_PACKET_SIZE];
+                    DatagramPacket receivePacket = new DatagramPacket(buffer, buffer.length);
+                    socket.receive(receivePacket);
 
-        } catch (Exception e) {
-            System.err.println("[MailDNSClient] Resolution Error: " + e.getMessage());
-            return null;
-        } finally {
-            if (socket != null && !socket.isClosed()) {
-                socket.close();
+                    // 5. Parse Response to extract MX hostname
+                    String result = parseResponse(buffer, receivePacket.getLength(), transactionID);
+                    if (result != null) {
+                        return result;
+                    }
+                    // If result is null (no MX found) but no error occurred, stop retrying.
+                    break; 
+
+                } catch (SocketTimeoutException e) {
+                    // Packet lost or server busy; loop to retry.
+                    continue;
+                } finally {
+                    if (socket != null && !socket.isClosed()) {
+                        socket.close();
+                    }
+                }
             }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
+        return null;
     }
 
     /**
-     * Reads /etc/resolv.conf to find the system's DNS server.
-     * Parses lines like "nameserver 1.1.1.1".
-     * Falls back to Google DNS (8.8.8.8) if file is missing or unreadable.
+     * Reads /etc/resolv.conf to find the system's active nameserver.
+     * * FILE STRUCTURE (/etc/resolv.conf):
+     * ----------------------------------
+     * # This file is managed by Docker
+     * nameserver 10.0.1.2   <-- We want to extract this IP
+     * options ndots:0
      */
     private static String getSystemDnsServer() {
-        File resolvConf = new File("/etc/resolv.conf");
-        if (!resolvConf.exists()) return "8.8.8.8";
+        File resolvConf = new File(MailSettings.DNS_CONFIGS_FILE);
+        if (!resolvConf.exists()) {
+            return "8.8.8.8"; // Fallback for local testing (Google DNS)
+        }
 
         try (BufferedReader br = new BufferedReader(new FileReader(resolvConf))) {
             String line;
             while ((line = br.readLine()) != null) {
                 line = line.trim();
-                // Skip comments (#) and empty lines
-                if (line.startsWith("#") || line.isEmpty()) continue;
-                
                 if (line.startsWith("nameserver")) {
                     String[] parts = line.split("\\s+");
                     if (parts.length >= 2) {
-                        return parts[1]; // Return the first IP found
+                        return parts[1]; // Return the IP address found
                     }
                 }
             }
         } catch (IOException e) {
-            // Ignore error and return fallback
+            e.printStackTrace();
         }
         return "8.8.8.8";
     }
 
     /**
-     * Constructs a DNS Query Packet.
-     * * PACKET STRUCTURE:
+     * Constructs the raw bytes for a DNS Query.
+     *
+     * PACKET VISUALIZATION (Query):
      * +---------------------+
-     * |        Header       | 12 bytes
+     * |    Header (12 B)    | -> ID, Flags, Counts
      * +---------------------+
-     * |       Question      | Variable length
+     * |   Question Section  | -> QNAME, QTYPE, QCLASS
      * +---------------------+
      */
     private static byte[] buildQuery(String domain, int transactionID) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
 
-        /* * --- DNS HEADER (12 Bytes) ---
+        /* * --- 1. DNS HEADER (12 Bytes) ---
          * * 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
          * |                      ID                       |  -> Transaction ID
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
          * |QR|   Opcode  |AA|TC|RD|RA|   Z    |   RCODE   |  -> Flags
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-         * |                    QDCOUNT                    |  -> # of Questions
+         * |                    QDCOUNT                    |  -> Questions Count
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-         * |                    ANCOUNT                    |  -> # of Answers
+         * |                    ANCOUNT                    |  -> Answer RRs
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-         * |                    NSCOUNT                    |  -> # of Authority Records
+         * |                    NSCOUNT                    |  -> Authority RRs
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-         * |                    ARCOUNT                    |  -> # of Additional Records
+         * |                    ARCOUNT                    |  -> Additional RRs
          * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
          */
         
         dos.writeShort(transactionID); 
-        dos.writeShort(0x0100); // Flags: QR=0 (Query), RD=1 (Recursion Desired)
+        
+        // Flags: 0x0100 
+        // QR (Query/Response) = 0 (Query)
+        // Opcode              = 0000 (Standard)
+        // RD (Recursion Desired) = 1 (We want the server to find the answer for us)
+        dos.writeShort(0x0100); 
+        
         dos.writeShort(0x0001); // QDCOUNT: 1 Question
         dos.writeShort(0x0000); // ANCOUNT: 0
         dos.writeShort(0x0000); // NSCOUNT: 0
         dos.writeShort(0x0000); // ARCOUNT: 0
 
         /*
-         * --- QUESTION SECTION ---
-         * Format: [Label Length][Label Bytes]...[0x00][Type][Class]
-         * Example: "google.com" -> [6]google[3]com[0]
+         * --- 2. QUESTION SECTION ---
+         * Format: [Label Length] [Label Bytes] ... [0x00] [Type] [Class]
+         * Example: "uliege.be" -> [6]uliege[2]be[0]
          */
         String[] labels = domain.split("\\.");
-
         for (String label : labels) {
             byte[] bytes = label.getBytes(StandardCharsets.UTF_8);
             dos.writeByte(bytes.length);
             dos.write(bytes);
         }
-
-        dos.writeByte(0x00); // Terminating Zero Byte
+        dos.writeByte(0x00); // Terminating Zero Byte (Root Label)
 
         dos.writeShort(TYPE_MX);  // QTYPE: MX (15)
         dos.writeShort(CLASS_IN); // QCLASS: Internet (1)
@@ -146,52 +189,54 @@ public class MailDNSClient {
 
     /**
      * Parses the DNS Response to find the best MX record.
-     * * RESPONSE STRUCTURE:
-     * 1. Header (12 bytes) - Contains the count of answers.
-     * 2. Question Section - Returns what we asked.
-     * 3. Answer Section - Contains the Resource Records (RRs).
+     * This method handles the complex pointer arithmetic required for DNS Compression.
      */
     private static String parseResponse(byte[] data, int length, int transactionID) throws IOException {
-        // We use a raw index pointer to traverse the byte array manually.
-        // This is safer for handling DNS pointers (compression).
-        int idx = 0;
+        // IndexPtr is a mutable wrapper for an integer, allowing us to pass the 
+        // current position in the byte array by reference to helper methods.
+        IndexPtr idx = new IndexPtr(0);
 
-        // --- 1. PARSE HEADER ---
-        int resID = ((data[idx] & 0xFF) << 8) | (data[idx+1] & 0xFF);
-        int flags = ((data[idx+2] & 0xFF) << 8) | (data[idx+3] & 0xFF);
-        int qdCount = ((data[idx+4] & 0xFF) << 8) | (data[idx+5] & 0xFF); // Questions Count
-        int anCount = ((data[idx+6] & 0xFF) << 8) | (data[idx+7] & 0xFF); // Answers Count
+        // =================================================================
+        // STEP 1: PARSE HEADER
+        // =================================================================
+        // Reading big-endian shorts manually: (HighByte << 8) | LowByte
+        int resID = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+        int flags = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+        int qdCount = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF); // Questions
+        int anCount = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF); // Answers
         
-        idx += 12; // Move past header
+        idx.val += 4; // Skip NSCOUNT (2) + ARCOUNT (2) - We don't use them.
 
-        // Validate ID
-        if (resID != transactionID) {
-            throw new IOException("Transaction ID mismatch");
-        }
+        // Security Check: Match ID to ensure this is the response to our query
+        if (resID != transactionID) return null; 
 
-        // --- 2. SKIP QUESTION SECTION ---
-        // The response echoes the question. We must skip it to get to the answers.
-        // Format: [Name][Type(2)][Class(2)]
+        // =================================================================
+        // STEP 2: SKIP QUESTION SECTION
+        // =================================================================
+        // The server echoes back the question we asked. We must jump over it 
+        // to reach the Answer Section.
         for (int i = 0; i < qdCount; i++) {
-            idx = skipName(data, idx); // Skip variable length name
-            idx += 4; // Skip QType (2) and QClass (2)
+            parseName(data, idx); // Parses name and advances 'idx'
+            idx.val += 4; // Skip QTYPE(2) + QCLASS(2)
         }
 
-        // --- 3. PARSE ANSWERS SECTION ---
+        // =================================================================
+        // STEP 3: PARSE ANSWER SECTION (Resource Records)
+        // =================================================================
         /*
-         * RESOURCE RECORD (RR) FORMAT:
+         * GENERIC RESOURCE RECORD (RR) STRUCTURE:
          * +---------------------+
-         * |        NAME         | Variable (Labels or Pointer)
+         * |        NAME         | -> Variable length (often a pointer 0xC0..)
          * +---------------------+
-         * |        TYPE         | 2 bytes
+         * |    TYPE (2 bytes)   | -> e.g., 15 for MX, 5 for CNAME
          * +---------------------+
-         * |        CLASS        | 2 bytes
+         * |    CLASS (2 bytes)  |
          * +---------------------+
-         * |         TTL         | 4 bytes
+         * |     TTL (4 bytes)   |
          * +---------------------+
-         * |      RDLENGTH       | 2 bytes (Length of RDATA)
+         * |  RDLENGTH (2 bytes) | -> Length of the RDATA following
          * +---------------------+
-         * |        RDATA        | Variable (MX Data for us)
+         * |        RDATA        | -> Variable (The actual answer)
          * +---------------------+
          */
 
@@ -199,72 +244,45 @@ public class MailDNSClient {
         int bestPreference = Integer.MAX_VALUE;
 
         for (int i = 0; i < anCount; i++) {
-            // Check if we are out of bounds
-            if (idx >= length) break;
+            if (idx.val >= length) break; // Safety check
 
-            // 1. Skip Name of the record (usually a pointer to the QName)
-            idx = skipName(data, idx);
+            // 1. Read Name (Usually a pointer to the QName in the question section)
+            parseName(data, idx);
 
-            // 2. Read Meta Data
-            int type = ((data[idx] & 0xFF) << 8) | (data[idx+1] & 0xFF);
-            // int clazz = ((data[idx+2] & 0xFF) << 8) | (data[idx+3] & 0xFF); // Unused
-            // long ttl = ... // Unused
+            // 2. Read Metadata
+            int type = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+            int clazz = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+            idx.val += 4; // Skip TTL (4 bytes), we don't cache in this project
             
-            // Get Data Length
-            int rdLength = ((data[idx+8] & 0xFF) << 8) | (data[idx+9] & 0xFF);
-            
-            // Move index to start of RDATA (Header is 10 bytes: Type(2)+Class(2)+TTL(4)+Len(2))
-            idx += 10; 
+            // 3. Read RDATA Length
+            int rdLength = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
 
+            // 4. Process RDATA based on TYPE
             if (type == TYPE_MX) {
                 /*
-                 * MX RDATA FORMAT:
+                 * MX RDATA STRUCTURE:
                  * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
                  * |                  PREFERENCE                   | 2 bytes
                  * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-                 * |                   EXCHANGE                    | Variable (Domain Name)
+                 * |                   EXCHANGE                    | Variable Name
                  * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
                  */
-                int preference = ((data[idx] & 0xFF) << 8) | (data[idx+1] & 0xFF);
+                int preference = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
                 
-                // Parse the Mail Exchange Server Name (starts after preference)
-                String mxHost = parseName(data, idx + 2);
+                // Parse the host name of the mail server
+                String mxHost = parseName(data, idx);
 
-                // Lower preference number is higher priority
+                // Logic: Lower preference number = Higher Priority
                 if (preference < bestPreference) {
                     bestPreference = preference;
                     bestMx = mxHost;
                 }
+            } else {
+                // If it's not an MX record (e.g., CNAME, A, SOA), we MUST skip it
+                // to correctly align with the start of the next record.
+                // We use rdLength to jump over the RDATA block.
+                idx.val += rdLength;
             }
-
-            // Move to the next record
-            // If we processed MX, idx is inside RDATA. We must jump based on rdLength relative to record start.
-            // Actually, simpler logic: 'idx' was incremented by 10. The RDATA ends at (idx + rdLength - 10)? 
-            // NO. The safest way is to track where RDATA started.
-            // Let's reset logic:
-            // The RDATA started at 'idx'.
-            // For the loop to continue correctly, we must ensure 'idx' points to the start of the NEXT record.
-            // The logic above advanced 'idx' by 10 to read preference. 
-            // So we need to advance by (rdLength) relative to the start of RDATA.
-            // Correct logic: The parsing of 'mxHost' moves 'idx' internally inside parseName? No, parseName is stateless.
-            
-            // Correction:
-            // We were at `startOfData` (idx). 
-            // We advanced 10 bytes for header.
-            // Now we are at start of RDATA.
-            // We must advance exactly `rdLength` bytes to reach the next record.
-            // However, inside the `if (type == MX)`, we read bytes.
-            // To be safe, we calculate `nextRecordIdx` before parsing RDATA.
-            
-            // REWIND LOGIC FOR ROBUSTNESS:
-            // 1. Calculate where the next record starts
-            int nextRecordIdx = idx + rdLength;
-            
-            // 2. Do the parsing if it's MX
-            // (Code already written above is fine, it just reads from 'idx')
-            
-            // 3. Jump to next record
-            idx = nextRecordIdx;
         }
 
         return bestMx;
@@ -272,53 +290,69 @@ public class MailDNSClient {
 
     /**
      * Reads a domain name from the byte array, handling DNS Compression.
-     * * COMPRESSION SCHEME (RFC 1035):
-     * If a byte starts with 11xxxxxx (>= 192 or 0xC0), it's a pointer.
-     * The remaining 14 bits form an offset from the start of the packet.
-     * * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-     * | 1  1 |                OFFSET                  |
-     * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+     * * COMPRESSION LOGIC (RFC 1035):
+     * -----------------------------
+     * To save space, DNS servers use pointers. 
+     * - Normal Label: [Length][Bytes...] (e.g., 03 www 06 google 03 com 00)
+     * - Pointer: Starts with bits 11xxxxxx (>= 0xC0).
+     * Structure: [11 + Offset High Bits] [Offset Low Bits]
+     * The pointer tells us to jump to a previous index in the packet to read the name.
+     * * @param data The full packet data
+     * @param idx  The current index pointer (Mutable)
+     * @return The decoded domain name string.
      */
-    private static String parseName(byte[] data, int index) {
+    private static String parseName(byte[] data, IndexPtr idx) {
         StringBuilder name = new StringBuilder();
-        int idx = index;
         boolean jumped = false;
-        int jumps = 0; // Guard against infinite loops
+        int jumps = 0; // Guard against infinite loops (malformed packets)
+
+        // Store the original position. If we jump via pointer, we must eventually 
+        // set the 'idx' to the position *after* the pointer in the original sequence.
+        int currentPos = idx.val; 
 
         while (true) {
-            if (jumps > 10) break; // Safety break
-            
-            int len = data[idx] & 0xFF;
+            if (jumps > 10) break; // Infinite loop protection
 
-            // Case 1: End of Name (0x00)
+            int len = data[currentPos] & 0xFF; // Read length byte
+
+            // Case A: End of Name (0x00)
             if (len == 0) {
+                currentPos++;
                 break;
             }
 
-            // Case 2: Compression Pointer (starts with 0xC0)
+            // Case B: Compression Pointer (starts with 11xxxxxx binary -> 0xC0 hex)
             if ((len & 0xC0) == 0xC0) {
-                // Read the offset (Current byte without top 2 bits + next byte)
-                int offset = ((len & 0x3F) << 8) | (data[idx+1] & 0xFF);
+                // Calculate Offset: Strip the 11xxxxxx prefix, combine with next byte
+                int offset = ((len & 0x3F) << 8) | (data[currentPos + 1] & 0xFF);
                 
-                idx = offset; // Jump to the offset
-                jumped = true;
+                // If this is our first jump, we need to record where we should resume 
+                // parsing the main packet later (currentPos + 2 bytes for the pointer).
+                if (!jumped) {
+                    idx.val = currentPos + 2; 
+                    jumped = true;
+                }
+                
+                currentPos = offset; // Jump to the pointer location
                 jumps++;
-                continue;
+            } 
+            // Case C: Normal Label
+            else {
+                currentPos++; // Move past length byte
+                for (int i = 0; i < len; i++) {
+                    name.append((char) data[currentPos++]);
+                }
+                name.append(".");
             }
-
-            // Case 3: Normal Label
-            idx++; // Move past length byte
-            for (int i = 0; i < len; i++) {
-                name.append((char) data[idx++]);
-            }
-            name.append(".");
-            
-            // If we have jumped via pointer, we don't advance the original index naturally
-            // because we are reading from elsewhere in the packet.
-            // The calling function only cares about the String returned.
         }
 
-        // Remove trailing dot
+        // If we processed a simple name without pointers, update the main index
+        // to where we finished reading.
+        if (!jumped) {
+            idx.val = currentPos;
+        }
+
+        // Format result: Remove trailing dot (e.g., "uliege.be." -> "uliege.be")
         if (name.length() > 0) {
             name.setLength(name.length() - 1);
         }
@@ -326,26 +360,12 @@ public class MailDNSClient {
     }
 
     /**
-     * Calculates how many bytes a Name field occupies in the current sequence.
-     * This is necessary to advance the main pointer past a Name field to get to Type/Class.
+     * Helper Class: IndexPtr
+     * Acts as a pointer reference for the byte array index.
+     * Allows helper methods to update the main parsing position.
      */
-    private static int skipName(byte[] data, int index) {
-        int idx = index;
-        while (true) {
-            int len = data[idx] & 0xFF;
-            
-            // Case 1: End of Name (1 byte)
-            if (len == 0) {
-                return idx - index + 1;
-            }
-
-            // Case 2: Compression Pointer (2 bytes total)
-            if ((len & 0xC0) == 0xC0) {
-                return idx - index + 2;
-            }
-
-            // Case 3: Normal Label (1 byte length + N bytes label)
-            idx += len + 1;
-        }
+    private static class IndexPtr {
+        int val;
+        IndexPtr(int val) { this.val = val; }
     }
 }

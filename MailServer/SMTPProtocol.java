@@ -153,6 +153,7 @@ public class SMTPProtocol extends MailProtocol {
                 case "QUIT":
                     // Close connection
                     sendResponse("221 Bye");
+                    close();
                     return; 
 
                 case "RSET":

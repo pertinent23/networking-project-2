@@ -24,4 +24,15 @@ public abstract class MailProtocol {
     }
 
     public abstract void handle() throws IOException;
+
+    /**
+     * Close the socket connexion 
+    */
+    protected void close() {
+        try{
+            socket.close();
+        } catch(IOException e) {
+            // the socket is probably already closed
+        }
+    }
 }

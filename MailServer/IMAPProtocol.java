@@ -96,8 +96,13 @@ public class IMAPProtocol extends MailProtocol {
                     case "EXPUNGE":
                     case "CLOSE":
                         handleExpunge(tag);
-                        if (cmd.equals("CLOSE")) currentMailbox = null;
                         sendOk(tag, cmd + " completed");
+                        
+                        if (cmd.equals("CLOSE")) {
+                            currentMailbox = null;
+                            close();
+                        }
+
                         break;
 
                     default:

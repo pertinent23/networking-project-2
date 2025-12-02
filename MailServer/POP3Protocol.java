@@ -27,6 +27,7 @@ public class POP3Protocol extends MailProtocol {
         while ((line = in.readLine()) != null) {
             String[] parts = line.split(" ", 2);
             String cmd = parts[0].toUpperCase();
+            System.out.println("[POP3Protocol.java: C: " + line + "]");
 
             switch (cmd) {
                 case "USER":
@@ -122,6 +123,7 @@ public class POP3Protocol extends MailProtocol {
                 case "QUIT":
                     processDeletions();
                     sendOk("Bye");
+                    close();
                     return;
 
                 default:
