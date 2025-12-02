@@ -3,6 +3,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * SMTP Protocol Handler
@@ -30,7 +32,7 @@ import java.net.Socket;
 public class SMTPProtocol extends MailProtocol {
     // Current transaction state
     private String sender = "";
-    private String recipient = "";
+    private List<String> recipients = new ArrayList<>();
     
     // Buffer to accumulate message data (Body + Headers) during DATA phase
     private StringBuilder dataBuffer = new StringBuilder();
@@ -79,15 +81,10 @@ public class SMTPProtocol extends MailProtocol {
                     dataMode = false;
                     processEmail();
                 } else {
-                    /*
-                     * --- TRANSPARENCY / DOT-STUFFING ---
-                     * If a line starts with a period, the client adds an extra period.
-                     * We must strip it here, unless we want to store it "stuffed".
-                     * Here, we keep it simple and store as received (or strip if needed).
-                     */
+                    // Handle dot-stuffing transparency (RFC 5321, Section 4.5.2)
+                    // If a line starts with a dot, the client sends two. We remove one.
                     if (line.startsWith(".")) {
-                        // In a full implementation, line = line.substring(1);
-                        dataBuffer.append(line).append("\r\n");
+                        dataBuffer.append(line.substring(1)).append("\r\n");
                     } else {
                         dataBuffer.append(line).append("\r\n");
                     }
@@ -132,8 +129,8 @@ public class SMTPProtocol extends MailProtocol {
                     try {
                         int colonIndex = line.indexOf(':');
                         if (colonIndex > -1) {
-                            recipient = extractEmail(line.substring(colonIndex + 1));
-                            sendResponse("250 OK");
+                            recipients.add(extractEmail(line.substring(colonIndex + 1)));
+                            sendResponse("250 OK Recipient accepted");
                         } else {
                             sendResponse("501 Syntax error");
                         }
@@ -159,7 +156,7 @@ public class SMTPProtocol extends MailProtocol {
                 case "RSET":
                     // Reset transaction state without dropping connection
                     sender = "";
-                    recipient = "";
+                    recipients.clear();
                     dataBuffer.setLength(0);
                     sendResponse("250 OK");
                     break;
@@ -176,60 +173,69 @@ public class SMTPProtocol extends MailProtocol {
      * Analyzes the recipient domain to decide the path.
     */
     private void processEmail() {
-        if (recipient == null || !recipient.contains("@")) {
-            sendResponse("550 Invalid recipient");
+        if (recipients.isEmpty()) {
+            sendResponse("554 No valid recipients");
+            resetTransaction();
             return;
         }
 
-        String targetDomain = recipient.substring(recipient.indexOf('@') + 1);
-        
-        // Check if the email is for this server
-        if (targetDomain.equalsIgnoreCase(serverDomain) || targetDomain.equals("localhost")) {
-            // --- LOCAL DELIVERY STRATEGY ---
-            try {
-                // Construct final email content with envelope headers
-                StringBuilder finalContent = new StringBuilder();
-                finalContent.append("Return-Path: <").append(sender).append(">\r\n");
-                finalContent.append("Delivered-To: ").append(recipient).append("\r\n");
-                finalContent.append(dataBuffer.toString());
+        boolean allSuccessful = true;
 
-                // Save to local disk via Manager
-                MailStorageManager.saveEmail(recipient, "INBOX", finalContent.toString());
-                sendResponse("250 OK Message accepted for delivery");
-            } catch (IOException e) {
-                e.printStackTrace();
-                sendResponse("451 Requested action aborted: local error");
+        for (String recipient : recipients) {
+            if (recipient == null || !recipient.contains("@")) {
+                // This specific recipient is invalid, but we continue with others.
+                continue;
             }
-        } else {
-            // --- RELAYING STRATEGY ---
-            // Security Note: In a real world scenario, you must check if 'sender' is authenticated
-            // or if 'sender' belongs to this domain. Otherwise, you are an "Open Relay".
-            
-            System.out.println("[SMTPProtocol.java: Relaying email to remote domain: " + targetDomain + "]");
-            try {
-                // 1. DNS Resolution (Find where to send)
-                String mxHost = MailDNSClient.resolveMX(targetDomain);
+
+            String targetDomain = recipient.substring(recipient.indexOf('@') + 1);
+
+            // Check if the email is for this server
+            if (targetDomain.equalsIgnoreCase(serverDomain) || targetDomain.equals("localhost")) {
+                // --- LOCAL DELIVERY STRATEGY ---
+                try {
+                    // Construct final email content with envelope headers
+                    StringBuilder finalContent = new StringBuilder();
+                    finalContent.append("Return-Path: <").append(sender).append(">\r\n");
+                    finalContent.append("Delivered-To: ").append(recipient).append("\r\n");
+                    finalContent.append(dataBuffer.toString());
+
+                    // Save to local disk via Manager
+                    MailStorageManager.saveEmail(recipient, "INBOX", finalContent.toString());
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    allSuccessful = false;
+                }
+            } else {
+                // --- RELAYING STRATEGY ---
+                System.out.println("[SMTPProtocol.java: Relaying email for " + recipient + " to remote domain " + targetDomain + "]");
                 
-                // Fallback : If no MX record found, treat domain as A record (Host)
-                if (mxHost == null) {
-                    System.out.println("[SMTPProtocol.java: No MX record found, falling back to A record: " + targetDomain + "]");
-                    mxHost = targetDomain;
+                String mxHost = MailDNSClient.resolveMX(targetDomain);
+                if (mxHost == null) mxHost = targetDomain; // Fallback to A record
+
+                String mxIpAddress = MailDNSClient.resolveA(mxHost);
+                if (mxIpAddress == null) mxIpAddress = mxHost; // Fallback to hostname if A fails
+
+                boolean success = sendToRemoteServer(mxIpAddress, sender, recipient, dataBuffer.toString());
+                if (!success) {
+                    allSuccessful = false;
+                    System.err.println("[SMTPProtocol.java: Failed to relay email for " + recipient + " to " + targetDomain);
                 }
-
-                // 2. SMTP Forwarding
-                boolean success = sendToRemoteServer(mxHost, sender, recipient, dataBuffer.toString());
-
-                if (success) {
-                    sendResponse("250 OK Message relayed to " + mxHost);
-                } else {
-                    sendResponse("451 Failed to relay message to remote server");
-                }
-
-            } catch (Exception e) {
-                e.printStackTrace();
-                sendResponse("451 Error during forwarding");
             }
         }
+
+        if (allSuccessful) {
+            sendResponse("250 OK Message accepted for delivery");
+        } else {
+            sendResponse("451 Requested action aborted: local error in processing one or more recipients");
+        }
+
+        resetTransaction();
+    }
+
+    private void resetTransaction() {
+        sender = "";
+        recipients.clear();
+        dataBuffer.setLength(0);
     }
 
     /**
@@ -262,22 +268,23 @@ public class SMTPProtocol extends MailProtocol {
     private boolean sendToRemoteServer(String mxHost, String sender, String recipient, String data) {
         // Standard SMTP port is 25. 
         // Note: Many ISPs block outgoing port 25 to prevent spam.
-        try (Socket socket = new Socket(mxHost, 25);
+        try (
+            Socket socket = new Socket(mxHost, 25);
             BufferedReader remoteIn = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            PrintWriter remoteOut = new PrintWriter(socket.getOutputStream(), true)) {
+            PrintWriter remoteOut = new PrintWriter(socket.getOutputStream(), true)
+        ) {
+
+            System.out.println("[SMTPProtocol.java: Starting communication with: " + mxHost + "]");
 
             // 1. Wait for Greeting
             if (!expect(remoteIn, "220")) {
                 return false;
             }
 
-            // 2. Handshake (EHLO preferred, fallback to HELO)
-            sendCmd(remoteOut, "EHLO " + serverDomain);
+            // 2. Handshake (HELO)
+            sendCmd(remoteOut, "HELO " + serverDomain);
             if (!expect(remoteIn, "250")) {
-                sendCmd(remoteOut, "HELO " + serverDomain);
-                if (!expect(remoteIn, "250")) {
-                    return false;
-                }
+                return false;
             }
 
             // 3. Envelope Sender
@@ -308,14 +315,17 @@ public class SMTPProtocol extends MailProtocol {
             }
             
             // Send body content
-            // NOTE: Technically, we should "dot-stuff" here (replace "\n." with "\n..") 
-            // to prevent premature ending.
-            remoteOut.print(data);
+            // Dot-stuffing: replace lines starting with "." with ".."
+            String stuffedData = data.replaceAll("(?m)^\\.", "..");
+            remoteOut.print(stuffedData);
             
             // End of Data Indicator (<CRLF>.<CRLF>)
-            sendCmd(remoteOut, "\r\n."); 
+            remoteOut.print(stuffedData.endsWith("\r\n") ? ".\r\n" : "\r\n.\r\n");
+            remoteOut.flush();
             
-            if (!expect(remoteIn, "250")) return false;
+            if (!expect(remoteIn, "250")) {
+                return false;
+            }
 
             // 6. Termination
             sendCmd(remoteOut, "QUIT");
@@ -333,6 +343,7 @@ public class SMTPProtocol extends MailProtocol {
     /**
      * Sends a raw response to the connected client.
      * Enforces CRLF (\r\n) line endings as per RFC 5321.
+     * @param msg
     */
     private void sendResponse(String msg) {
         out.print(msg + "\r\n");
@@ -342,7 +353,9 @@ public class SMTPProtocol extends MailProtocol {
     /**
      * Sends a command to a remote server.
      * Trims input and appends CRLF.
-     */
+     * @param cmd
+     * @param out
+    */
     private void sendCmd(PrintWriter out, String cmd) {
         out.print(cmd.trim() + "\r\n");
         out.flush();
@@ -350,7 +363,9 @@ public class SMTPProtocol extends MailProtocol {
 
     /**
      * Reads a line from the remote server and checks if it starts with the expected code.
-     */
+     * @param in
+     * @param code
+    */
     private boolean expect(BufferedReader in, String code) throws IOException {
         String line = in.readLine();
         // System.out.println("Debug Remote Response: " + line); 
@@ -359,7 +374,9 @@ public class SMTPProtocol extends MailProtocol {
 
     /**
      * Utility to clean email addresses (remove < and >).
-     */
+     * @param raw
+     * @return
+    */
     private String extractEmail(String raw) {
         return raw.trim().replace("<", "").replace(">", "");
     }

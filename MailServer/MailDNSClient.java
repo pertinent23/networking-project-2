@@ -21,6 +21,7 @@ public class MailDNSClient {
     // --- CONSTANTS ---
     private static final int DNS_PORT = 53;
     private static final int TYPE_MX = 15;  // Mail Exchange Record Type
+    private static final int TYPE_A = 1;
     private static final int CLASS_IN = 1;  // Internet Class
     
     // Standard UDP DNS Packet Limit (RFC 1035).
@@ -29,7 +30,7 @@ public class MailDNSClient {
     private static final int MAX_PACKET_SIZE = 512; 
 
     /**
-     * Resolves the MX record for a domain using raw UDP.
+     * Resolves the MX | A record for a domain using raw UDP.
      * * FLOW:
      * 1. Detect DNS Server IP (from OS config).
      * 2. Construct Query Packet (Header + Question).
@@ -38,9 +39,10 @@ public class MailDNSClient {
      * 5. Parse Response (Header -> Skip Question -> Read Answers).
      *
      * @param domain The domain to resolve (e.g., "uliege.be")
+     * @param TYPE The record type (MX or A)
      * @return The mail server hostname with the highest priority (lowest preference), or null.
      */
-    public static String resolveMX(String domain) {
+    private static String resolveRecord(String domain, final int TYPE) {
         DatagramSocket socket = null;
         try {
             // 1. Identify the DNS Server from /etc/resolv.conf
@@ -58,7 +60,7 @@ public class MailDNSClient {
                     // 2. Build the DNS Query Packet
                     // We generate a random ID to match the request with the response.
                     int transactionID = new Random().nextInt(65535);
-                    byte[] requestData = buildQuery(domain, transactionID);
+                    byte[] requestData = buildQuery(domain, transactionID, TYPE);
                     
                     DatagramPacket sendPacket = new DatagramPacket(requestData, requestData.length, dnsAddress, DNS_PORT);
                     
@@ -71,7 +73,7 @@ public class MailDNSClient {
                     socket.receive(receivePacket);
 
                     // 5. Parse Response to extract MX hostname
-                    String result = parseResponse(buffer, receivePacket.getLength(), transactionID);
+                    String result = parseResponse(buffer, receivePacket.getLength(), transactionID, TYPE);
                     if (result != null) {
                         return result;
                     }
@@ -94,12 +96,31 @@ public class MailDNSClient {
     }
 
     /**
+     * resolve a record of type A
+     * @param domain
+     * @return
+    */
+    public static String resolveA(String domain) {
+        return resolveRecord(domain, TYPE_A);
+    }
+
+    /**
+     * resolve a record of type MX
+     * @param domain
+     * @return
+    */
+    public static String resolveMX(String domain) {
+        return resolveRecord(domain, TYPE_MX);
+    }
+
+    /**
      * Reads /etc/resolv.conf to find the system's active nameserver.
      * * FILE STRUCTURE (/etc/resolv.conf):
      * ----------------------------------
      * # This file is managed by Docker
      * nameserver 10.0.1.2   <-- We want to extract this IP
      * options ndots:0
+     * @return 
      */
     private static String getSystemDnsServer() {
         File resolvConf = new File(MailSettings.DNS_CONFIGS_FILE);
@@ -133,8 +154,14 @@ public class MailDNSClient {
      * +---------------------+
      * |   Question Section  | -> QNAME, QTYPE, QCLASS
      * +---------------------+
+     * 
+     * @param domain The domain to resolve (e.g., "uliege.be")
+     * @param transactionID
+     * @param TYPE
+     * @return
+     * @throws IOException
      */
-    private static byte[] buildQuery(String domain, int transactionID) throws IOException {
+    private static byte[] buildQuery(String domain, int transactionID, final int TYPE) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
 
@@ -181,7 +208,7 @@ public class MailDNSClient {
         }
         dos.writeByte(0x00); // Terminating Zero Byte (Root Label)
 
-        dos.writeShort(TYPE_MX);  // QTYPE: MX (15)
+        dos.writeShort(TYPE);  // QTYPE: MX OR A
         dos.writeShort(CLASS_IN); // QCLASS: Internet (1)
 
         return baos.toByteArray();
@@ -190,8 +217,13 @@ public class MailDNSClient {
     /**
      * Parses the DNS Response to find the best MX record.
      * This method handles the complex pointer arithmetic required for DNS Compression.
+     * @param data
+     * @param length
+     * @param transactionID
+     * @param TYPE
+     * @return
      */
-    private static String parseResponse(byte[] data, int length, int transactionID) throws IOException {
+    private static String parseResponse(byte[] data, int length, int transactionID, final int TYPE) throws IOException {
         // IndexPtr is a mutable wrapper for an integer, allowing us to pass the 
         // current position in the byte array by reference to helper methods.
         IndexPtr idx = new IndexPtr(0);
@@ -200,15 +232,26 @@ public class MailDNSClient {
         // STEP 1: PARSE HEADER
         // =================================================================
         // Reading big-endian shorts manually: (HighByte << 8) | LowByte
+        
+        // Transaction ID
         int resID = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+        
+        //Skip flags
+        @SuppressWarnings("unused") //To avoid warning about unused variable
         int flags = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+        
+        // Skip QDCOUNT (2)
         int qdCount = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF); // Questions
+        
+        // Skip ANCOUNT (2)
         int anCount = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF); // Answers
         
         idx.val += 4; // Skip NSCOUNT (2) + ARCOUNT (2) - We don't use them.
 
         // Security Check: Match ID to ensure this is the response to our query
-        if (resID != transactionID) return null; 
+        if (resID != transactionID) {
+            return null;
+        } 
 
         // =================================================================
         // STEP 2: SKIP QUESTION SECTION
@@ -251,6 +294,7 @@ public class MailDNSClient {
 
             // 2. Read Metadata
             int type = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
+            @SuppressWarnings("unused") //To avoid warning about unused variable
             int clazz = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
             idx.val += 4; // Skip TTL (4 bytes), we don't cache in this project
             
@@ -258,7 +302,16 @@ public class MailDNSClient {
             int rdLength = ((data[idx.val++] & 0xFF) << 8) | (data[idx.val++] & 0xFF);
 
             // 4. Process RDATA based on TYPE
-            if (type == TYPE_MX) {
+            if (type == TYPE && type == TYPE_A) {
+                StringBuilder ip = new StringBuilder();
+
+                for (int j = 0; j < 4; j++) {
+                    ip.append(data[idx.val++] & 0xFF);
+                    if (j < 3) ip.append(".");
+                }
+
+                return ip.toString(); // Retourne "10.0.3.7"
+            } else if (type == TYPE && type == TYPE_MX) {
                 /*
                  * MX RDATA STRUCTURE:
                  * +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
@@ -285,7 +338,11 @@ public class MailDNSClient {
             }
         }
 
-        return bestMx;
+        if (TYPE == TYPE_MX) {
+            return bestMx;
+        }
+
+        return null;
     }
 
     /**
@@ -297,7 +354,7 @@ public class MailDNSClient {
      * - Pointer: Starts with bits 11xxxxxx (>= 0xC0).
      * Structure: [11 + Offset High Bits] [Offset Low Bits]
      * The pointer tells us to jump to a previous index in the packet to read the name.
-     * * @param data The full packet data
+     * @param data The full packet data
      * @param idx  The current index pointer (Mutable)
      * @return The decoded domain name string.
      */
@@ -366,6 +423,13 @@ public class MailDNSClient {
      */
     private static class IndexPtr {
         int val;
-        IndexPtr(int val) { this.val = val; }
+
+        /**
+         * 
+         * @param val
+        */
+        IndexPtr(int val) { 
+            this.val = val; 
+        }
     }
 }

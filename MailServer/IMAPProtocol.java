@@ -10,11 +10,12 @@ import java.util.regex.Pattern;
  * Handles basic IMAP commands
 */
 public class IMAPProtocol extends MailProtocol {
+    // Current user logged in
     private String currentUser = null;
-    private String currentMailbox = null;
-    private int msn = 1;
 
-    // we use this to track messages in the selected mailbox
+    // The mailbox currently selected by the user
+    private String currentMailbox = null;
+    
     private List<File> currentMessages = new ArrayList<>();
 
     // regex to parse IMAP command lines
@@ -410,29 +411,25 @@ public class IMAPProtocol extends MailProtocol {
         // Regex to capture complex body requests: BODY[], BODY[HEADER], BODY.PEEK[TEXT], etc.
         // Group 1: .PEEK (optional)
         // Group 2: Section inside brackets (e.g., HEADER, TEXT, or empty for full body)
-        Pattern bodyPattern = Pattern.compile("BODY(\\.PEEK)?\\[(.*?)\\]", Pattern.CASE_INSENSITIVE);
-
         // Parse the requested UID set
         Set<Integer> requestedUids = parseUidRange(range);
 
-        resetMSN();
-
-        currentMessages.forEach(msg -> {
+        for (int i = 0; i < currentMessages.size(); i++) {
+            File msg = currentMessages.get(i);
             int uid = getUidFromFile(msg);
 
-            if (!requestedUids.contains(uid)) {
-                return;
-            }
+            if (!requestedUids.contains(uid)) continue;
 
-            if (!msg.exists()) {
-                return;
-            }
+            if (!msg.exists()) continue;
+
+            // The Message Sequence Number (MSN) is the 1-based index in the sorted list.
+            int msn = i + 1;
 
             try {
                 StringBuilder sb = new StringBuilder();
 
                 sb.append("* ")
-                .append(getMSN())
+                .append(msn)
                 .append(" FETCH (");
 
                 List<String> responseParts = new ArrayList<>();
@@ -462,7 +459,8 @@ public class IMAPProtocol extends MailProtocol {
                 }
 
                 // --- Handle Specific BODY[...] Sections ---
-                Matcher matcher = bodyPattern.matcher(dataItemsRaw);
+                Pattern bodyPattern = Pattern.compile("BODY(\\.PEEK)?\\[(.*?)\\]", Pattern.CASE_INSENSITIVE);
+                Matcher matcher = bodyPattern.matcher(dataItemsUpper);
                 while (matcher.find()) {
                     boolean isPeek = (matcher.group(1) != null); // Checks if .PEEK is present
                     String section = matcher.group(2).toUpperCase(); // content inside brackets
@@ -515,11 +513,10 @@ public class IMAPProtocol extends MailProtocol {
                 out.flush();
 
             } catch (IOException e) {
-                // Inside forEach, we must handle checked exceptions. 
-                // We log it to server console but avoid crashing the whole loop.
                 System.err.println("[IMAPProtocol.java: Error fetching message " + uid + ": " + e.getMessage() + "]");
             }
-        });
+        }
+
 
         sendOk(tag, "UID FETCH completed");
     }
@@ -532,14 +529,15 @@ public class IMAPProtocol extends MailProtocol {
     private void handleUidStore(String tag, String params) {
         try {
             // Syntax: UID STORE <range> <operation> FLAGS (<flags>) [SILENT]
-            String[] p = params.split("\\s+");
+            String[] p = params.split("\\s+", 2);
             String range = p[0];
-            // Search for FLAGS part
+            
+            // Determine the operation type based on the presence of a sign before FLAGS.
             boolean isAdd = params.toUpperCase().contains("+FLAGS");
             boolean isRemove = params.toUpperCase().contains("-FLAGS");
-            boolean isSet = !isAdd && !isRemove; // FLAGS tout court
+            boolean isSet = !isAdd && !isRemove; // If no sign is present, the operation is a replacement (SET).
 
-            // Extraction des flags entre parenthèses
+            // Extract flags from within the parentheses
             int startParen = params.indexOf("(");
             int endParen = params.indexOf(")");
             if (startParen == -1 || endParen == -1) {
@@ -551,11 +549,11 @@ public class IMAPProtocol extends MailProtocol {
 
             Set<Integer> targetUids = parseUidRange(range);
 
-            resetMSN();
-
-            currentMessages.forEach((filename) -> {
-                int uid = getUidFromFile(filename);
+            for (int i = 0; i < currentMessages.size(); i++) {
+                File msg = currentMessages.get(i);
+                int uid = getUidFromFile(msg);
                 if(targetUids.contains(uid)) {
+                    int msn = i + 1; // Correct MSN for the untagged response
                     List<String> current = new ArrayList<>(MailStorageManager.getFlags(currentUser, currentMailbox, uid));
 
                     if (isSet) {
@@ -569,10 +567,7 @@ public class IMAPProtocol extends MailProtocol {
                         } else if (isRemove) {
                             current.remove(flag);
                         } else if (isSet) {
-                            /**
-                             * We replace the entire flag set with the new flags
-                             * 
-                            */
+                            // For a SET operation, we ensure the new flags are present.
                             if (!current.contains(flag)) 
                                 current.add(flag); 
                         }
@@ -582,10 +577,10 @@ public class IMAPProtocol extends MailProtocol {
                 
                     // if the client did not request silent mode, send untagged response
                     if (!params.toUpperCase().contains("SILENT")) {
-                        out.print("* " + getMSN() + " FETCH (UID " + uid + " FLAGS (" + String.join(" ", current) + "))\r\n");
+                        out.print("* " + msn + " FETCH (UID " + uid + " FLAGS (" + String.join(" ", current) + "))\r\n");
                     }
                 }
-            });
+            }
 
             sendOk(tag, "UID STORE completed");
         } catch (Exception e) {
@@ -599,9 +594,14 @@ public class IMAPProtocol extends MailProtocol {
      * @param params
     */
     private void handleUidCopy(String tag, String params) {
-        String[] parts = params.split("\\s+", 2);
-        String range = parts[0];
-        String destMailbox = (parts.length > 1) ? parts[1].trim().replace("\"", "") : "";
+        // Use a more robust parser to separate the UID range from the destination mailbox.
+        Matcher m = Pattern.compile("([^\\s]+)\\s+\"?([^\"\\s]+)\"?").matcher(params);
+        if (!m.find()) {
+            sendBad(tag, "Invalid arguments for COPY");
+            return;
+        }
+        String range = m.group(1);
+        String destMailbox = m.group(2);
 
         if (destMailbox.isEmpty()) { 
             sendBad(tag, "Missing destination mailbox"); 
@@ -610,38 +610,34 @@ public class IMAPProtocol extends MailProtocol {
 
         // Destination mailbox must exist (INBOX is allowed)
         if (!destMailbox.equalsIgnoreCase("INBOX") && !MailStorageManager.folderExists(currentUser, destMailbox)) {
-            sendNo(tag, "Destination mailbox does not exist");
+            // RFC says we should respond with: OK [TRYCREATE] Mailbox does not exist
+            out.print(tag + " NO [TRYCREATE] Mailbox does not exist: " + destMailbox + "\r\n");
+            out.flush();
             return;
         }
 
         Set<Integer> targetUids = parseUidRange(range);
+        List<Integer> copiedUids = new ArrayList<>();
 
-        
-        currentMessages.forEach((filename) -> {
-            int uid = getUidFromFile(filename);
-            if(targetUids.contains(uid)) {
-                File file = MailStorageManager.getMessageFile(currentUser, currentMailbox, uid);
-                if (file != null && file.exists()) {
-                    try {
-                        int nextUid = MailStorageManager.getNextUID(currentUser, destMailbox);
-                        MailStorageManager.copyMessage(currentUser, file, destMailbox, nextUid);
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                        System.err.println("[IMAPProtocol.java: failed to copy message UID " + uid + " to mailbox " + destMailbox + "]");
-                    }
-                } else {
-                    System.err.println("[IMAPProtocol.java: message file not found for UID " + uid + "]");
-                    sendNo(tag, "Message file not found for UID " + uid);
+        for (File msgFile : currentMessages) {
+            int uid = getUidFromFile(msgFile);
+            if (targetUids.contains(uid)) {
+                try {
+                    int nextUid = MailStorageManager.getNextUID(currentUser, destMailbox);
+                    MailStorageManager.copyMessage(currentUser, msgFile, destMailbox, nextUid);
+                    copiedUids.add(uid);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                    System.err.println("[IMAPProtocol.java: failed to copy message UID " + uid + " to mailbox " + destMailbox + "]");
+                    sendNo(tag, "Failed to copy message UID " + uid);
+                    return; // Stop on first error
                 }
-            } else {
-                sendNo(tag, "Message file not found for UID " + uid);
             }
-        });
+        }
 
         // If copying into the currently selected mailbox, refresh currentMessages
         if (destMailbox.equalsIgnoreCase(currentMailbox)) {
-            currentMessages = new ArrayList<>(MailStorageManager.getMessages(currentUser, currentMailbox));
-            currentMessages.sort(Comparator.comparingInt(this::getUidFromFile));
+            refreshCurrentMessages();
         }
 
         // send tagged OK with COPYUID response as many servers do
@@ -661,20 +657,22 @@ public class IMAPProtocol extends MailProtocol {
         
         Iterator<File> it = currentMessages.iterator();
 
-        resetMSN();
-
+        int msn = 1;
         while (it.hasNext()) {
             File file = it.next();
             int uid = getUidFromFile(file);
             List<String> flags = MailStorageManager.getFlags(currentUser, currentMailbox, uid);
             
             if (flags.contains("\\Deleted")) {
-                if (file.exists()) {
-                    file.delete();
+                try {
+                    MailStorageManager.deleteMessageFile(file);
+                    // Also remove from metadata
+                    new MailStorageManager.MetaDataManager(currentUser, currentMailbox).removeUID(uid);
+                    it.remove();
+                    out.print("* " + msn + " EXPUNGE\r\n");
+                } catch (IOException e) {
+                    System.err.println("Failed to expunge message " + uid + ": " + e.getMessage());
                 }
-
-                it.remove();
-                out.print("* " + getMSN() + " EXPUNGE\r\n");
             }
         }
         
@@ -691,10 +689,14 @@ public class IMAPProtocol extends MailProtocol {
         if (freshList.size() > currentMessages.size()) {
             out.print("* " + freshList.size() + " EXISTS\r\n");
             out.print("* " + (freshList.size() - currentMessages.size()) + " RECENT\r\n");
-            // update the currentMessages list
-            currentMessages = new ArrayList<>(freshList);
-            currentMessages.sort(Comparator.comparingInt(this::getUidFromFile));
+            refreshCurrentMessages();
         }
+    }
+
+    // Reloads the message list for the current mailbox and sorts it by UID.
+    private void refreshCurrentMessages() {
+        currentMessages = new ArrayList<>(MailStorageManager.getMessages(currentUser, currentMailbox));
+        currentMessages.sort(Comparator.comparingInt(this::getUidFromFile));
     }
 
     /**
@@ -704,7 +706,7 @@ public class IMAPProtocol extends MailProtocol {
     */
     private int getUidFromFile(File f) {
         try {
-            // we assume filename is like "123.eml"
+            // We assume the filename is like "123.eml"
             return Integer.parseInt(f.getName().split("[^0-9]")[0]);
         } catch (Exception e) {
             return 0;
@@ -724,10 +726,10 @@ public class IMAPProtocol extends MailProtocol {
                 String[] parts = range.split(":");
                 int start = Integer.parseInt(parts[0]);
                 int maxUid = currentMessages.stream().mapToInt(this::getUidFromFile).max().orElse(0);
-                // if "*" is used, it means up to the max UID
+                // A "*" in the range means "up to the highest UID".
                 int end = parts[1].equals("*") ? maxUid : Integer.parseInt(parts[1]);
                 
-                // if the range is reversed
+                // Handle cases where the range might be reversed (e.g., "500:*")
                 if (end < start && parts[1].equals("*")) {
                     end = Integer.MAX_VALUE;
                 }
@@ -741,7 +743,7 @@ public class IMAPProtocol extends MailProtocol {
                     try { 
                         uids.add(Integer.parseInt(s)); 
                     } catch (Exception ignored) {
-                        // ignore invalid numbers
+                        // Ignore invalid numbers in a comma-separated list
                     }
                 }
             } else {
@@ -973,13 +975,7 @@ public class IMAPProtocol extends MailProtocol {
         return Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(name).matches();
     }
 
-    /**
-     * Helper to recursively find folders.
-     * @param dir Current directory to scan
-     * @param prefix Relative path prefix (e.g. "Archive/")
-     * @param result Map to collect results
-     * @return 
-     */
+    // Helper to recursively find folders.
     private void listFoldersRecursively(File dir, String prefix, Map<String, File> result) {
         File[] files = dir.listFiles(File::isDirectory);
         if (files == null) return;
@@ -1034,20 +1030,5 @@ public class IMAPProtocol extends MailProtocol {
     private void sendBad(String tag, String msg) {
         out.print(tag + " BAD " + msg + "\r\n");
         out.flush();
-    }
-
-    /**
-     * 
-     * @return
-    */
-    private int getMSN() {
-        return msn++;
-    }
-
-    /**
-     * Reset MSN counter
-    */
-    private void resetMSN() {
-        msn = 1;
     }
 }

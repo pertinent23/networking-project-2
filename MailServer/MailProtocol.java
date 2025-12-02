@@ -23,6 +23,10 @@ public abstract class MailProtocol {
         this.out = new PrintWriter(rawOut, true);
     }
 
+    /**
+     * Handle the protocol
+     * @throws IOException
+    */
     public abstract void handle() throws IOException;
 
     /**
