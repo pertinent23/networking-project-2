@@ -1,13 +1,13 @@
 $ORIGIN .
 $TTL 0	; 0 seconds
 @			IN SOA	. . (
-				5          ; serial
+				7          ; serial
 				0          ; refresh (0 seconds)
 				0          ; retry (0 seconds)
 				0          ; expire (0 seconds)
 				0          ; minimum (0 seconds)
 				)
-			KEYDATA	20251203185025 20251202131339 19700101000000 257 3 8 (
+			KEYDATA	20251203215922 20251202131339 19700101000000 257 3 8 (
 				AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTO
 				iW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN
 				7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5
@@ -17,9 +17,9 @@ $TTL 0	; 0 seconds
 				A4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws
 				9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU=
 				) ; KSK; alg = RSASHA256; key id = 20326
-				; next refresh: Wed, 03 Dec 2025 18:50:25 GMT
+				; next refresh: Wed, 03 Dec 2025 21:59:22 GMT
 				; trusted since: Tue, 02 Dec 2025 13:13:39 GMT
-			KEYDATA	20251203185025 20251202131339 19700101000000 257 3 8 (
+			KEYDATA	20251203215922 20251202131339 19700101000000 257 3 8 (
 				AwEAAa96jeuknZlaeSrvyAJj6ZHv28hhOKkx3rLGXVaC
 				6rXTsDc449/cidltpkyGwCJNnOAlFNKF2jBosZBU5eeH
 				spaQWOmOElZsjICMQMC3aeHbGiShvZsx4wMYSjH8e7Vr
@@ -29,5 +29,5 @@ $TTL 0	; 0 seconds
 				u1TQNatX2XBuzZNQ1K+s2CXkPIZo7s6JgZyvaBevYtxP
 				vYLw4z9mR7K2vaF18UYH9Z9GNUUeayffKC73PYc=
 				) ; KSK; alg = RSASHA256; key id = 38696
-				; next refresh: Wed, 03 Dec 2025 18:50:25 GMT
+				; next refresh: Wed, 03 Dec 2025 21:59:22 GMT
 				; trusted since: Tue, 02 Dec 2025 13:13:39 GMT

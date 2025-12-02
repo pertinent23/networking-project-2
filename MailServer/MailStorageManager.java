@@ -1,9 +1,6 @@
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -29,19 +26,27 @@ public class MailStorageManager {
          * @param foldername
         */
         public MetaDataManager(String username, String foldername) {
-            Path path = Paths.get(MailSettings.STORAGE_BASE_DIR, username, foldername, MailSettings.META_DATA_FILE);
+            File path = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username)
+                    .concat(File.separator)
+                    .concat(foldername), 
+            MailSettings.META_DATA_FILE);
 
-            if (!Files.exists(path)) {
+            if (!path.exists()) {
                 try {
-                    Files.createDirectories(path.getParent());
-                    Files.writeString(path, "LAST_UID=0\nFOLDER_UID=" + folderUID + "\n");
+                    path.getParentFile().mkdirs();
+                    try (FileWriter writer = new FileWriter(path)) {
+                        writer.write("LAST_UID=0\nFOLDER_UID=".concat(folderUID).concat("\n"));
+                    }
                 } catch (IOException e) {
                     e.printStackTrace();
                 } finally {
-                    this.meta = path.toFile();
+                    this.meta = path;
                 }
             } else {
-                this.meta = path.toFile();
+                this.meta = path;
             }
 
             try {
@@ -67,10 +72,10 @@ public class MailStorageManager {
                 scanner.close();
             } catch (IOException e) {
                 // this schould not happen
-                System.err.println("[MailStorageManager.java: Failed to read metadata for " + username + "/" + foldername + "]");
+                System.err.println("[MailStorageManager.java: Failed to read metadata for ".concat(username).concat("/").concat(foldername).concat("]"));
             } catch (NumberFormatException e) {
                 // this schould not happen
-                System.err.println("[MailStorageManager.java: Invalid metadata format for " + username + "/" + foldername + "]");
+                System.err.println("[MailStorageManager.java: Invalid metadata format for ".concat(username).concat("/").concat(foldername).concat("]"));
             }
         }
 
@@ -98,7 +103,7 @@ public class MailStorageManager {
                 }
                 
                 for (var entry : metadata.entrySet()) {
-                    writer.write(entry.getKey() + "=" + entry.getValue() + "\n");
+                    writer.write(entry.getKey().toString().concat("=").concat(entry.getValue()).concat("\n"));
                 }
 
                 writer.close();
@@ -288,13 +293,21 @@ public class MailStorageManager {
 
         MetaDataManager meta = new MetaDataManager(username, foldername);
 
-        // Structure: storage/user/INBOX/timestamp-uid.eml
         int lastUID = meta.getNextUID();
-        Path inbox = Paths.get(MailSettings.STORAGE_BASE_DIR, username, foldername);
-        Files.createDirectories(inbox);
+        File inboxDir = new File(
+            MailSettings.STORAGE_BASE_DIR, username
+                .concat(File.separator)
+                .concat(foldername)
+        );
+        
+        if (!inboxDir.exists()) {
+            inboxDir.mkdirs();
+        }
         
         String filename = lastUID + ".eml";
-        Files.writeString(inbox.resolve(filename), content);
+        try (FileWriter writer = new FileWriter(new File(inboxDir, filename))) {
+            writer.write(content);
+        }
         meta.addFlags(lastUID, "\\Recent"); // Initialize with no flags
     }
 
@@ -306,7 +319,7 @@ public class MailStorageManager {
     */
     public static synchronized File getUserDirectory(String user) throws IOException {
         String username = user.split("@")[0];
-        File userDir = Paths.get(MailSettings.STORAGE_BASE_DIR, username).toFile();
+        File userDir = new File(MailSettings.STORAGE_BASE_DIR, username);
         
         if (!userDir.exists()) {
             userDir.mkdirs();
@@ -324,20 +337,22 @@ public class MailStorageManager {
     */
     public static synchronized boolean createFolder(String user, String folderName) {
         String username = user.split("@")[0];
-        Path folderPath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName);
+        File folder = new File(
+            MailSettings.STORAGE_BASE_DIR
+                        .concat(File.separator)
+                        .concat(user.split("@")[0]), 
+        folderName);
         
-        if (Files.exists(folderPath)) {
+        if (folder.exists()) {
             return false; 
         }
 
         // Initialize metadata for the new folder
         new MetaDataManager(username, folderName);
 
-        try {
-            Files.createDirectories(folderPath);
+        if (folder.mkdirs() || folder.exists()) {
             return true;
-        } catch (IOException e) {
-            e.printStackTrace();
+        } else {
             return false;
         }
     }
@@ -350,40 +365,39 @@ public class MailStorageManager {
     */
     public static synchronized boolean deleteFolder(String user, String folderName) {
         String username = user.split("@")[0];
-        Path folderPath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName);
+        File folder = new File(
+            MailSettings.STORAGE_BASE_DIR
+                .concat(File.separator)
+                .concat(username), 
+        folderName);
         
-        if (!Files.exists(folderPath) || !Files.isDirectory(folderPath)) {
+        if (!folder.exists() || !folder.isDirectory()) {
             return false; 
         }
 
-        try {
-            Files.walk(folderPath)
-                .map(Path::toFile)
-                .sorted((a, b) -> b.compareTo(a))
-                .forEach(File::delete);
-            return true;
-        } catch (IOException e) {
-            e.printStackTrace();
-            return false;
+        return deleteDirectory(folder);
+    }
+
+    private static boolean deleteDirectory(File directoryToBeDeleted) {
+        File[] allContents = directoryToBeDeleted.listFiles();
+        if (allContents != null) {
+            for (File file : allContents) {
+                deleteDirectory(file);
+            }
         }
+        return directoryToBeDeleted.delete();
     }
 
     public static synchronized boolean renameFolder(String user, String oldName, String newName) {
         String username = user.split("@")[0];
-        Path oldPath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, oldName);
-        Path newPath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, newName);
+        File oldDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), oldName);
+        File newDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), newName);
         
-        if (!Files.exists(oldPath) || Files.exists(newPath)) {
+        if (!oldDir.exists() || newDir.exists()) {
             return false; 
         }
-
-        try {
-            Files.move(oldPath, newPath);
-            return true;
-        } catch (IOException e) {
-            e.printStackTrace();
-            return false;
-        }
+        
+        return oldDir.renameTo(newDir);
     }
 
     /**
@@ -394,8 +408,12 @@ public class MailStorageManager {
     */
     public static synchronized boolean folderExists(String user, String folderName) {
         String username = user.split("@")[0];
-        Path folderPath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName);
-        return Files.exists(folderPath) && Files.isDirectory(folderPath);
+        File folder = new File(
+            MailSettings.STORAGE_BASE_DIR
+                .concat(File.separator)
+                .concat(username), 
+        folderName);
+        return folder.exists() && folder.isDirectory();
     }
 
     /**
@@ -405,12 +423,17 @@ public class MailStorageManager {
      */
     public static synchronized List<File> getMessages(String user, String folderName) {
         String username = user.split("@")[0];
-        Path inbox = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName);
-        if (!Files.exists(inbox)) {
+        File inboxDir = new File(
+            MailSettings.STORAGE_BASE_DIR
+                .concat(File.separator)
+                .concat(username), 
+        folderName);
+
+        if (!inboxDir.exists()) {
             return new LinkedList<>();
         }
 
-        File[] files = inbox.toFile().listFiles((dir, name) -> name.endsWith(".eml"));
+        File[] files = inboxDir.listFiles((dir, name) -> name.endsWith(".eml"));
         return files != null ? List.of(files) : new LinkedList<>();
     }
     
@@ -423,10 +446,18 @@ public class MailStorageManager {
     */
     public static synchronized File getMessageFile(String user, String folderName, int uid) {
         String username = user.split("@")[0];
-        Path filePath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName, uid + ".eml");
-        if (Files.exists(filePath)) {
-            return filePath.toFile();
+        File file = new File(
+            MailSettings.STORAGE_BASE_DIR
+                .concat(File.separator)
+                .concat(username)
+                .concat(File.separator)
+                .concat(folderName), 
+        uid + ".eml");
+
+        if (file.exists()) {
+            return file;
         }
+
         return null;
     }
 
@@ -438,12 +469,17 @@ public class MailStorageManager {
     */
     public static synchronized int getMessageCount(String user, String folderName) {
         String username = user.split("@")[0];
-        Path inbox = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName);
-        if (!Files.exists(inbox)) {
+        File inboxDir = new File(
+            MailSettings.STORAGE_BASE_DIR
+                .concat(File.separator)
+                .concat(username), 
+        folderName);
+
+        if (!inboxDir.exists()) {
             return 0;
         }
 
-        File[] files = inbox.toFile().listFiles((dir, name) -> name.endsWith(".eml"));
+        File[] files = inboxDir.listFiles((dir, name) -> name.endsWith(".eml"));
         return files != null ? files.length : 0;
     }
 
@@ -455,8 +491,18 @@ public class MailStorageManager {
      */
     public static synchronized void deleteMessage(String user, String folderName, String filename) throws IOException {
         String username = user.split("@")[0];
-        Path filePath = Paths.get(MailSettings.STORAGE_BASE_DIR, username, folderName, filename);
-        Files.deleteIfExists(filePath);
+        File file = new File(
+            MailSettings.STORAGE_BASE_DIR
+                .concat(File.separator)
+                .concat(username)
+                .concat(File.separator)
+                .concat(folderName), 
+        filename);
+        
+        if (file.exists()) {
+            file.delete();
+        }
+
         new MetaDataManager(username, folderName).updateFlag(Integer.parseInt(filename.split("\\.")[0]), "\\Deleted", true);
     }
 
@@ -467,7 +513,7 @@ public class MailStorageManager {
     */
     public static synchronized void deleteMessageFile(File file) throws IOException {
         if (file != null && file.exists()) {
-            Files.delete(file.toPath());
+            file.delete();
         }
     }
 
@@ -481,11 +527,26 @@ public class MailStorageManager {
     */
     public static synchronized void copyMessage(String user, File messageFile, String targetFolder, int uid) throws IOException {
         String username = user.split("@")[0];
-        Path targetDir = Paths.get(MailSettings.STORAGE_BASE_DIR, username, targetFolder);
-        Files.createDirectories(targetDir);
+        File targetDir = new File(
+            MailSettings.STORAGE_BASE_DIR
+                        .concat(File.separator)
+                        .concat(username), 
+            targetFolder);
+        
+        if (!targetDir.exists()) {
+            targetDir.mkdirs();
+        }
 
-        Path targetFile = targetDir.resolve(("" + uid).concat(".eml"));
-        Files.copy(messageFile.toPath(), targetFile);
+        File targetFile = new File(targetDir, ("" + uid).concat(".eml"));
+
+        try (java.io.InputStream in = new java.io.FileInputStream(messageFile);
+             java.io.OutputStream out = new java.io.FileOutputStream(targetFile)) {
+            byte[] buffer = new byte[1024];
+            int length;
+            while ((length = in.read(buffer)) > 0) {
+                out.write(buffer, 0, length);
+            }
+        }
 
         new MetaDataManager(username, targetFolder).addFlags(uid, "\\Seen");
     }

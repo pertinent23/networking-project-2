@@ -3,7 +3,6 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 /**
  * MailServer Entry Point
@@ -82,14 +81,6 @@ public class MailServer {
         System.out.println("   Pool Size: " + maxThreads);
         System.out.println("=================================================");
 
-        // 3. Register Shutdown Hook (Graceful Exit on Ctrl+C)
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("\n>> Shutting down Mail Server...");
-            isRunning = false;
-            shutdownPool();
-            System.out.println(">> Bye.");
-        }));
-
         // 4. Start Protocol Listeners in separate threads
         // We use simple threads here because they are long-lived (Daemon-like)
         // and their job is just to accept connections and dispatch them to the pool.
@@ -142,26 +133,6 @@ public class MailServer {
             System.err.println("[MailServer.java:   Reason: " + e.getMessage() + "]");
             // In a real server, we might want to exit if a port binds fail, 
             // but here we let other services continue.
-        }
-    }
-
-    /**
-     * Gracefully shuts down the executor service.
-     */
-    private static void shutdownPool() {
-        threadPool.shutdown(); // Disable new tasks
-        try {
-            // Wait a while for existing tasks to terminate
-            if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
-                threadPool.shutdownNow(); // Cancel currently executing tasks
-                // Wait a while for tasks to respond to being cancelled
-                if (!threadPool.awaitTermination(5, TimeUnit.SECONDS))
-                    System.err.println("Pool did not terminate");
-            }
-        } catch (InterruptedException ie) {
-            // (Re-)Cancel if current thread also interrupted
-            threadPool.shutdownNow();
-            Thread.currentThread().interrupt();
         }
     }
 }

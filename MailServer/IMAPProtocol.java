@@ -1,6 +1,5 @@
 import java.io.*;
 import java.net.Socket;
-import java.nio.file.Files;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -32,7 +31,7 @@ public class IMAPProtocol extends MailProtocol {
 
         String line;
         while ((line = in.readLine()) != null) {
-            System.out.println("[IMAPProtocol.java: C: " + line + "]"); 
+            System.out.println("[IMAPProtocol.java: C: ".concat(line).concat("]")); 
 
             Matcher matcher = IMAP_CMD_PATTERN.matcher(line);
             if (!matcher.find()) continue;
@@ -96,7 +95,7 @@ public class IMAPProtocol extends MailProtocol {
 
                     case "EXPUNGE":
                     case "CLOSE":
-                        handleExpunge(tag);
+                        handleExpunge();
                         sendOk(tag, cmd + " completed");
                         
                         if (cmd.equals("CLOSE")) {
@@ -112,7 +111,7 @@ public class IMAPProtocol extends MailProtocol {
                 out.flush();
             } catch (Exception e) {
                 e.printStackTrace();
-                out.print(tag + " NO Error: " + e.getMessage() + "\r\n");
+                out.print(tag.concat(" NO Error: ").concat(e.getMessage()).concat("\r\n"));
                 out.flush();
             }
         }
@@ -206,7 +205,7 @@ public class IMAPProtocol extends MailProtocol {
                         String safeName = name.replace("\"", "\\\"");
                         String attrStr = String.join(" ", attributes);
                         
-                        out.print("* LIST (" + attrStr + ") \"/\" \"" + safeName + "\"\r\n");
+                        out.print("* LIST (".concat(attrStr).concat(") \"/\" \"").concat(safeName).concat("\"\r\n"));
                     }
                 });
             }
@@ -273,15 +272,16 @@ public class IMAPProtocol extends MailProtocol {
             return; 
         }
 
-        String[] parts = args.split(" ");
+        // Use the robust parser to handle spaces in folder names
+        String[] parts = parseListArgs(args);
         
-        if (parts.length < 2) { 
-            sendBad(tag, "Missing args"); 
+        if (parts.length < 2 || parts[0].isEmpty() || parts[1].isEmpty()) { 
+            sendBad(tag, "RENAME requires two quoted folder names"); 
             return; 
         }
         
-        String oldName = parts[0].replace("\"", "");
-        String newName = parts[1].replace("\"", "");
+        String oldName = parts[0];
+        String newName = parts[1];
 
         if (MailStorageManager.renameFolder(currentUser, oldName, newName)) {
             sendOk(tag, "RENAME completed");
@@ -343,12 +343,21 @@ public class IMAPProtocol extends MailProtocol {
         // 3. you can now sort it
         currentMessages.sort(Comparator.comparingInt(this::getUidFromFile));
 
+        // Get the persistent UIDVALIDITY for this mailbox
+        String folderUidString = MailStorageManager.getFolderUID(currentUser, currentMailbox);
+        int uidValidity = Math.abs(folderUidString.hashCode());
+
         int maxUid = currentMessages.stream().mapToInt(this::getUidFromFile).max().orElse(0);
         int uidNext = maxUid + 1;
 
+        // Dynamically count messages with the \Recent flag
+        long recentCount = currentMessages.stream()
+            .filter(msg -> MailStorageManager.getFlags(currentUser, currentMailbox, getUidFromFile(msg)).contains("\\Recent"))
+            .count();
+
         out.print("* " + currentMessages.size() + " EXISTS\r\n");
-        out.print("* 0 RECENT\r\n");
-        out.print("* OK [UIDVALIDITY 1] UIDs valid\r\n");
+        out.print("* " + recentCount + " RECENT\r\n");
+        out.print("* OK [UIDVALIDITY " + uidValidity + "] UIDs valid\r\n");
         out.print("* OK [UIDNEXT " + uidNext + "] Predicted next UID\r\n");
         out.print("* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n");
         out.print("* OK [PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft \\*)] Limited\r\n");
@@ -483,8 +492,14 @@ public class IMAPProtocol extends MailProtocol {
                         out.flush();
 
                         // Stream raw file content to output
-                        Files.copy(msg.toPath(), rawOut);
-                        rawOut.flush();
+                        try (FileInputStream fis = new FileInputStream(msg)) {
+                            byte[] buffer = new byte[4096];
+                            int bytesRead;
+                            while ((bytesRead = fis.read(buffer)) != -1) {
+                                rawOut.write(buffer, 0, bytesRead);
+                            }
+                            rawOut.flush();
+                        }
 
                         // Reset buffers for potential subsequent parts (closing parenthesis)
                         sb = new StringBuilder();
@@ -495,7 +510,7 @@ public class IMAPProtocol extends MailProtocol {
                          * We extract the requested section and include it in the response
                          * for BODY[HEADER] or BODY[TEXT]
                         */
-                        String content = extractBodySection(msg, section);
+                        String content = extractBodySection(msg, section.toUpperCase());
                         responseParts.add("BODY[" + section + "] {" + content.getBytes().length + "}\r\n" + content);
                     }
                 }
@@ -641,7 +656,7 @@ public class IMAPProtocol extends MailProtocol {
         }
 
         // send tagged OK with COPYUID response as many servers do
-        out.print(tag + " OK [COPYUID " + targetUids.size() + " " + currentMailbox.toString() + " " + destMailbox.toString() + "] COPY completed\r\n");
+        out.print(tag + " OK [COPYUID " + targetUids.size() + " " + currentMailbox + " " + destMailbox + "] COPY completed\r\n");
         out.flush();
     }
 
@@ -649,12 +664,7 @@ public class IMAPProtocol extends MailProtocol {
      * Handle EXPUNGE command
      * @param tag
     */
-    private void handleExpunge(String tag) {
-        if (currentMailbox == null) {
-            sendNo(tag, "You must select a mailbox first");
-            return;
-        }
-        
+    private void handleExpunge() {
         Iterator<File> it = currentMessages.iterator();
 
         int msn = 1;
@@ -677,7 +687,6 @@ public class IMAPProtocol extends MailProtocol {
         }
         
         out.flush();
-        sendOk(tag, "EXPUNGE completed");
     }
 
     /**
@@ -1008,7 +1017,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param msg
     */
     private void sendOk(String tag, String msg) {
-        out.print(tag + " OK " + msg + "\r\n");
+        out.print(tag.concat(" OK ").concat(msg).concat("\r\n"));
         out.flush();
     }
 
@@ -1018,7 +1027,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param msg
     */
     private void sendNo(String tag, String msg) {
-        out.print(tag + " NO " + msg + "\r\n");
+        out.print(tag.concat(" NO ").concat(msg).concat("\r\n"));
         out.flush();
     }
 
@@ -1028,7 +1037,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param msg
     */
     private void sendBad(String tag, String msg) {
-        out.print(tag + " BAD " + msg + "\r\n");
+        out.print(tag.concat(" BAD ").concat(msg).concat("\r\n"));
         out.flush();
     }
 }

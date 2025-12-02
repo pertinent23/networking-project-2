@@ -211,11 +211,13 @@ public class SMTPProtocol extends MailProtocol {
                 
                 String mxHost = MailDNSClient.resolveMX(targetDomain);
                 if (mxHost == null) mxHost = targetDomain; // Fallback to A record
+                
 
                 String mxIpAddress = MailDNSClient.resolveA(mxHost);
                 if (mxIpAddress == null) mxIpAddress = mxHost; // Fallback to hostname if A fails
 
                 boolean success = sendToRemoteServer(mxIpAddress, sender, recipient, dataBuffer.toString());
+                
                 if (!success) {
                     allSuccessful = false;
                     System.err.println("[SMTPProtocol.java: Failed to relay email for " + recipient + " to " + targetDomain);
@@ -232,6 +234,7 @@ public class SMTPProtocol extends MailProtocol {
         resetTransaction();
     }
 
+    // reset the transaction
     private void resetTransaction() {
         sender = "";
         recipients.clear();

@@ -1,6 +1,5 @@
 import java.io.*;
 import java.net.*;
-import java.nio.charset.StandardCharsets;
 import java.util.Random;
 
 /**
@@ -202,7 +201,7 @@ public class MailDNSClient {
          */
         String[] labels = domain.split("\\.");
         for (String label : labels) {
-            byte[] bytes = label.getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = label.getBytes("UTF-8");
             dos.writeByte(bytes.length);
             dos.write(bytes);
         }
