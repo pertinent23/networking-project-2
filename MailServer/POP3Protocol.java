@@ -21,6 +21,26 @@ public class POP3Protocol extends MailProtocol {
         super(socket, domain);
     }
 
+    /**
+     * Main Protocol Loop
+     * Implements the POP3 State Machine.
+     * State Machine Diagram:
+     * (Connection Est.)
+     * |
+     * v
+     * +------+------+
+     * | COMMAND MODE| <----qt-----+
+     * +------+------+             |
+     * | DATA Command              |
+     * v                           |
+     * +------+------+             |
+     * |  DATA MODE  |             |
+     * | (Read Body) |             |
+     * +------+------+             |
+     * | <CRLF>.<CRLF>             |
+     * v                           |
+     * [Process Email] ------------+
+     */
     @Override
     public void handle() throws IOException {
         sendOk("POP3 server ready");
@@ -143,7 +163,7 @@ public class POP3Protocol extends MailProtocol {
 
     /**
      * Refreshes the local message list from the storage.
-     */
+    */
     private void refreshMessageList() {
         if (currentUser != null) {
             messages = MailStorageManager.getMessages(currentUser, currentFolder);
@@ -153,7 +173,7 @@ public class POP3Protocol extends MailProtocol {
     /**
      * Returns a list of messages not marked for deletion.
      * @return A list of visible messages.
-     */
+    */
     private List<File> getVisibleMessages() {
         List<File> visible = new ArrayList<>();
         for (File msg : messages) {
@@ -281,6 +301,11 @@ public class POP3Protocol extends MailProtocol {
         }
     }
 
+    /**
+     * Check if a message is marked for deletion
+     * @param message
+     * @return
+    */
     private boolean isMarkedForDeletion(File message) {
         int uid = getUidFromFile(message);
         List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, uid);

@@ -15,6 +15,7 @@ public class IMAPProtocol extends MailProtocol {
     // The mailbox currently selected by the user
     private String currentMailbox = null;
     
+    // list of messages in the current mailbox
     private List<File> currentMessages = new ArrayList<>();
 
     // regex to parse IMAP command lines
@@ -24,6 +25,12 @@ public class IMAPProtocol extends MailProtocol {
         super(socket, domain);
     }
 
+    /**
+     * Handle IMAP commands
+     * 
+     * @throws IOException
+     */
+    @Override
     public void handle() throws IOException {
         // Greeting with capabilities
         out.print("* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+] IMAP4rev1 Service Ready\r\n");
@@ -290,6 +297,13 @@ public class IMAPProtocol extends MailProtocol {
         }
     }
 
+    /**
+     * Handle SUBSCRIBE command
+     * 
+     * @param tag
+     * @param args
+     * @param subscribe
+    */
     private void handleSubscribe(String tag, String args, boolean subscribe) {
         // For simplicity, we accept the command but do not store subscriptions
         if (currentUser == null) { 
@@ -364,6 +378,11 @@ public class IMAPProtocol extends MailProtocol {
         sendOk(tag, "[READ-WRITE] SELECT completed");
     }
 
+    /**
+     * Handle UID command
+     * @param tag
+     * @param args
+    */
     private void handleUidCommand(String tag, String args) throws IOException {
         if (currentMailbox == null) { 
             sendNo(tag, "Select mailbox first"); 
@@ -893,7 +912,9 @@ public class IMAPProtocol extends MailProtocol {
     /**
      * Helper to format email address for IMAP ENVELOPE.
      * Returns ((name route mailbox host)) or NIL.
-     */
+     * @param raw
+     * @return
+    */
     private String parseAddress(String raw) {
         if (raw == null || raw.isEmpty()) return "NIL";
         
@@ -928,7 +949,7 @@ public class IMAPProtocol extends MailProtocol {
      * Handles: "" "*", "REF" "PAT", etc.
      * @param args
      * @return array of [reference, pattern]
-     */
+    */
     private String[] parseListArgs(String args) {
         List<String> result = new ArrayList<>();
         StringBuilder current = new StringBuilder();
@@ -984,7 +1005,12 @@ public class IMAPProtocol extends MailProtocol {
         return Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(name).matches();
     }
 
-    // Helper to recursively find folders.
+    /**
+     * list folder recursively  
+     * @param dir
+     * @param prefix
+     * @param result
+    */
     private void listFoldersRecursively(File dir, String prefix, Map<String, File> result) {
         File[] files = dir.listFiles(File::isDirectory);
         if (files == null) return;

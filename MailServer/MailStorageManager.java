@@ -173,6 +173,10 @@ public class MailStorageManager {
             }
         }
 
+        /**
+         * Set subscription status for a folder.
+         * @param subscribed
+        */
         public synchronized void setSubscribed(boolean subscribed) {
             this.isSubscribed = subscribed;
             try {
@@ -378,6 +382,11 @@ public class MailStorageManager {
         return deleteDirectory(folder);
     }
 
+    /**
+     * Delete a directory recursively.
+     * @param directoryToBeDeleted
+     * @return
+    */
     private static boolean deleteDirectory(File directoryToBeDeleted) {
         File[] allContents = directoryToBeDeleted.listFiles();
         if (allContents != null) {
@@ -388,6 +397,14 @@ public class MailStorageManager {
         return directoryToBeDeleted.delete();
     }
 
+    /**
+     * Rename a folder for a specific user.
+     *      
+     * @param user
+     * @param oldName
+     * @param newName
+     * @return
+    */
     public static synchronized boolean renameFolder(String user, String oldName, String newName) {
         String username = user.split("@")[0];
         File oldDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), oldName);

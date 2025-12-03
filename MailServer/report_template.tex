@@ -1,0 +1,121 @@
+\documentclass[12pt]{article}
+
+\usepackage[english]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{a4paper, margin=2.5cm}
+
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Configuration for code snippets if needed
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  stringstyle=\color{red},
+  commentstyle=\color{green!50!black},
+  breaklines=true
+}
+
+\title{Introduction to Computer Networking\\Mail Server Project Report}
+
+\author{Heuba Franck Duval, Firstname Lastname \\ Students ID: S227629, XXXXX}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+The objective of this assignment was to design and implement a fully functional Mail Server in Java, capable of operating within a distributed network environment simulated via Docker. Our server acts as both a Mail Transfer Agent (MTA) and a Mail Delivery Agent (MDA). It implements three core application-layer protocols: SMTP (for sending and relaying emails), POP3 (for retrieving emails), and IMAP (for synchronizing mailboxes). A key feature of our implementation is the development of a custom raw UDP DNS client to resolve Mail Exchange (MX) records without relying on high-level libraries, strictly adhering to RFC specifications.
+
+\section{Software Architecture}
+We adopted a modular architecture centered around a main server class that delegates protocol handling to specific worker threads. 
+
+\begin{itemize}
+    \item \textbf{MailServer (Entry Point):} This class initializes the server configuration and the thread pool. It listens on ports 25 (SMTP), 110 (POP3), and 143 (IMAP). Upon accepting a connection, it wraps the client socket in a generic \texttt{MailClient} task and submits it to the thread pool.
+    
+    \item \textbf{MailClient \& Protocols:} The \texttt{MailClient} class determines which protocol to instantiate based on the port connected. We implemented three abstract classes extending \texttt{MailProtocol}:
+    \begin{itemize}
+        \item \texttt{SMTPProtocol}: Implements the SMTP state machine. It handles local delivery by writing to the file system and performs remote relaying by acting as a client to other mail servers.
+        \item \texttt{POP3Protocol}: Handles authentication and basic retrieval commands (\texttt{USER}, \texttt{PASS}, \texttt{LIST}, \texttt{RETR}, \texttt{DELE}).
+        \item \texttt{IMAPProtocol}: A more complex handler supporting folder management and persistent UIDs (\texttt{SELECT}, \texttt{UID FETCH}, \texttt{EXPUNGE}). It parses complex arguments (e.g., \texttt{BODY.PEEK}) using Regex.
+    \end{itemize}
+    
+    \item \textbf{MailDNSClient (Custom DNS):} A standalone utility that constructs raw DNS query packets (headers, questions) byte-by-byte and parses the binary response to extract MX and A records. It handles DNS pointer compression (RFC 1035).
+    
+    \item \textbf{MailStorageManager:} A static helper class acting as the data access layer. It synchronizes access to the file system (storage directory) and manages metadata (UIDs, flags like \texttt{\textbackslash Seen}) to ensure data consistency across threads.
+\end{itemize}
+
+\textbf{Interaction Flow:} When a request arrives, \texttt{MailServer} spawns a thread. The \texttt{SMTPProtocol} uses \texttt{MailDNSClient} to resolve destinations. If delivery is local, or if a client uses POP3/IMAP, the protocols interact with \texttt{MailStorageManager} to read/write `.eml` files and update the `.metadata` files.
+
+\section{Mail forwarding and resolution}
+In the scenario where \texttt{dcd@gembloux.uliege.be} sends an email to \texttt{vj@info.uliege.be} (with empty caches), the following steps occur:
+
+\begin{enumerate}
+    \item \textbf{SMTP Submission:} The Thunderbird client \newline
+    connects to our mail server at \texttt{gembloux.uliege.be} 
+    on port 25. The \texttt{SMTPProtocol} 
+    receives the \texttt{RCPT TO:<vj@info.uliege.be>} command.
+    \item \textbf{Domain Analysis:} The server identifies \newline
+    that the recipient domain (\texttt{info.uliege.be}) is different from its own (\texttt{gembloux.uliege.be}). It initiates the relaying process.
+    \item \textbf{DNS Query Construction:} The \texttt{MailDNSClient} reads \texttt{/etc/resolv.conf} to find the local nameserver (e.g., 10.0.2.2). It constructs a raw query packet with \texttt{QTYPE=MX} (15) for \texttt{info.uliege.be}.
+    \item \textbf{DNS Resolution:} 
+        \begin{itemize}
+            \item The packet is sent over UDP port 53.
+            \item Since caches are empty, the local DNS (Gembloux) may query the root/parent DNS (Uliege). 
+            \item The DNS responds with the MX record: \texttt{mail.info.uliege.be} (Preference 10).
+            \item Our client parses the binary response, handling pointer compression to read the hostname.
+            \item A second lookup is performed (Type A) to resolve \texttt{mail.info.uliege.be} to its IP address (10.0.3.7).
+        \end{itemize}
+    \item \textbf{SMTP Relay:} Our server opens a TCP socket to 10.0.3.7 on port 25. It acts as a client, sending \texttt{HELO}, \texttt{MAIL FROM}, \texttt{RCPT TO}, and \texttt{DATA}.
+    \item \textbf{Delivery:} The remote server (\texttt{info}) accepts the message and stores it locally via its own \texttt{MailStorageManager}.
+\end{enumerate}
+
+\section{Multi-thread coordination}
+To ensure robustness and scalability, we avoided creating a new thread for every single connection, which could lead to resource exhaustion (DoS). Instead, we utilized a \textbf{Thread Pool} pattern.
+
+\begin{itemize}
+    \item We used \texttt{java.util.concurrent.ExecutorService} with a fixed pool size (configurable via command line arguments, typically 10 threads).
+    \item When a socket is accepted, the job is submitted to the pool. If all threads are busy, the request waits in a queue.
+\end{itemize}
+
+\textbf{Data Synchronization:} Since multiple threads (IMAP and SMTP) might access the same mailbox simultaneously, we synchronized critical sections in \texttt{MailStorageManager}. Methods modifying the file system or the metadata files (e.g., \texttt{saveEmail}, \texttt{updateFlag}, \texttt{getNextUID}) are marked with the \texttt{synchronized} keyword. This guarantees that file writes are atomic and prevents race conditions where two emails could receive the same UID.
+
+\section{Limits}
+While functional, our implementation has certain limitations:
+\begin{itemize}
+    \item \textbf{Security:} Authentication is performed in plain text. We do not support STARTTLS or SSL, making the server vulnerable to packet sniffing.
+    \item \textbf{Robustness of Parsing:} The IMAP parser uses Regular Expressions (\texttt{java.util.regex}). \newline
+    While sufficient for the project scope, 
+    this is fragile against malformed or extremely complex nested commands compared to a tokenizer/lexer approach.
+    \item \textbf{DNS Size Limit:} Our UDP DNS client uses a fixed buffer of 512 bytes. If a response exceeds this (setting the Truncation flag), we do not implement the TCP fallback required by RFC 1035, meaning large DNS responses would be lost.
+\end{itemize}
+
+\section{Possible Improvements}
+\begin{itemize}
+    \item \textbf{Encryption:} Implementing TLS context to support secure SMTPS and IMAPS connections.
+    \item \textbf{Database Integration:} Replacing the file-based storage with a relational database (e.g., SQLite or PostgreSQL) would significantly improve performance for large mailboxes and simplify concurrency management.
+    \item \textbf{Spam Filtering:} Adding a simple content filter in the SMTP \texttt{DATA} phase to reject messages containing specific keywords.
+\end{itemize}
+
+\section{Conclusion}
+This project was a challenging but rewarding deep dive into application-layer protocols. The most difficult part was implementing the \textbf{$MailDNSClient$}.
+Manually constructing binary packets and handling DNS compression pointers required a precise understanding of bits and bytes, which we learned to manage effectively using Java's streams and bitwise operators. 
+We heavily relied on online resources to understand the packet structure, notably an article on "DNS Request and Response in Java"[cite: 1]. 
+
+We also learned how to manage state in stateful protocols like SMTP and IMAP versus the stateless nature of HTTP. Implementing the synchronization logic for the shared file storage taught us the practical importance of thread safety in concurrent systems.
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+\bibitem{dnsjava}
+Aditya. 
+\textit{DNS Request and Response in Java}. 
+GitConnected, 2023. 
+Available at: \url{https://levelup.gitconnected.com/dns-request-and-response-in-java-acbd51ad3467}
+\end{thebibliography}
+
+\end{document}

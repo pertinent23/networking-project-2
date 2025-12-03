@@ -25,12 +25,12 @@ import java.util.concurrent.Executors;
  * v           v           v                v
  * [SMTP]      [IMAP]      [POP3]        [Shared Pool]
  * Listener    Listener    Listener      (Workers)
- * Thread      Thread      Thread             |
- * |           |           |               |
- * | accept()  | accept()  | accept()      |
- * +-----+-----+-----+-----+               |
- * |           |                     |
- * +-----> Submit Job >--------------+
+ * Thread      Thread      Thread           |
+ * |           |           |                |
+ * | accept()  | accept()  | accept()       |
+ * +-----+-----+-----+-----+                |
+ * |           |                            |
+ * +-----> Submit Job >---------------------+
  * |
  * [MailClient Handler]
  * (Runs Protocol Logic)
@@ -92,7 +92,7 @@ public class MailServer {
 
     /**
      * Helper to start a listener thread for a specific protocol.
-     * * @param type The protocol type (enum)
+     * @param type The protocol type (enum)
      * @param port The port to bind to
      */
     private static void startListenerThread(MailProtocolType type, int port) {
@@ -103,7 +103,7 @@ public class MailServer {
 
     /**
      * Opens a ServerSocket and continuously accepts client connections.
-     * * @param protocol The protocol type
+     * @param protocol The protocol type
      * @param port The port to listen on
      */
     private static void startService(MailProtocolType protocol, int port) {
