@@ -13,11 +13,19 @@ public class MailStorageManager {
      * to store flag and UID information
     */
     public static class MetaDataManager {
+        //the meta data file for the folder
         private final File meta;
 
+        //the last UID used
         private int lastUID = 0;
+
+        //equal to true if the folder is subscribed
         private boolean isSubscribed = false;
+
+        //the folder UID
         private String folderUID = UUID.randomUUID().toString() + System.currentTimeMillis();
+
+        //the list of metadata flags for each UID
         private HashMap<Integer, String> metadata = new HashMap<>();
 
         /**
@@ -265,24 +273,6 @@ public class MailStorageManager {
             }
         }
     }
-
-    /**
-     * Authenticate a user based on username, password, and domain.
-     *
-     * @param user
-     * @param password
-     * @param domain
-     * @return
-     */
-    public static boolean authenticate(String user, String password, String domain) {
-        // Verify if a user exists in the system for the given domain
-        if (!user.endsWith("@" + domain)) 
-            return false;
-
-        String username = user.split("@")[0];
-        return MailSettings.USERS.containsKey(username) && MailSettings.USERS.get(username).equals(password);
-    }
-
     
     /**
      * Store an email for a specific recipient.

@@ -3,6 +3,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,40 +38,48 @@ public class SMTPProtocol extends MailProtocol {
     // Buffer to accumulate message data (Body + Headers) during DATA phase
     private StringBuilder dataBuffer = new StringBuilder();
 
+    //last time the client was active
+    private volatile long lastActivityTime;
+
+    //equal true while the server is running
+    private volatile boolean isRunning = true;
+
     public SMTPProtocol(Socket socket, String domain) throws IOException {
         super(socket, domain);
     }
 
     /**
      * Main Protocol Loop
-     * Implements the SMTP State Machine.
-     * State Machine Diagram:
-     * (Connection Est.)
-     * |
-     * v
-     * +------+------+
-     * | COMMAND MODE| <----qt-----+
-     * +------+------+             |
-     * | DATA Command              |
-     * v                           |
-     * +------+------+             |
-     * |  DATA MODE  |             |
-     * | (Read Body) |             |
-     * +------+------+             |
-     * | <CRLF>.<CRLF>             |
-     * v                           |
-     * [Process Email] ------------+
-     * </pre>
+     * Implements the SMTP State Machine with an inactivity timer.
      */
     @Override
     public void handle() throws IOException {
+        socket.setSoTimeout(MailSettings.SOCKET_READ_TIMEOUT_MS);
+        lastActivityTime = System.currentTimeMillis();
+
         // Step 1: Send initial greeting (Service Ready)
         sendResponse("220 " + serverDomain + " Simple Mail Transfer Service Ready");
         
         String line;
         boolean dataMode = false;
         
-        while ((line = in.readLine()) != null) {
+        while (isRunning) {
+            try {
+                line = in.readLine();
+                if (line == null) {
+                    isRunning = false;
+                    break;
+                }
+                lastActivityTime = System.currentTimeMillis();
+
+            } catch (SocketTimeoutException e) {
+                if ((System.currentTimeMillis() - lastActivityTime) > MailSettings.SMTP_TIMEOUT_MS) {
+                    System.out.println("[SMTPProtocol.java: Client timed out due to inactivity.]");
+                    sendResponse("421 " + serverDomain + " Service not available, closing transmission channel");
+                    isRunning = false;
+                }
+                continue; // Continue to next loop iteration to check isRunning or wait for data
+            }
             
             // =================================================================================
             // PHASE 1: DATA MODE (Reading Email Content)
@@ -150,14 +159,12 @@ public class SMTPProtocol extends MailProtocol {
                 case "QUIT":
                     // Close connection
                     sendResponse("221 Bye");
-                    close();
-                    return; 
+                    isRunning = false;
+                    break; 
 
                 case "RSET":
                     // Reset transaction state without dropping connection
-                    sender = "";
-                    recipients.clear();
-                    dataBuffer.setLength(0);
+                    resetTransaction();
                     sendResponse("250 OK");
                     break;
 
@@ -166,6 +173,7 @@ public class SMTPProtocol extends MailProtocol {
                     break;
             }
         }
+        close(); // Ensure connection is closed when loop terminates
     }
 
     /**

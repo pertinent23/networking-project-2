@@ -3,6 +3,7 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -13,9 +14,20 @@ import java.util.List;
  *  
 */
 public class POP3Protocol extends MailProtocol {
+    // Current user logged in
     private String currentUser = null;
+
+    // list of messages in the current mailbox
     private List<File> messages = new ArrayList<>();
+
+    // current folder
     private final String currentFolder = "INBOX";
+
+    //last time the client was active
+    private volatile long lastActivityTime;
+
+    //equal true while the server is running
+    private volatile boolean isRunning = true;
 
     public POP3Protocol(Socket socket, String domain) throws IOException {
         super(socket, domain);
@@ -23,30 +35,34 @@ public class POP3Protocol extends MailProtocol {
 
     /**
      * Main Protocol Loop
-     * Implements the POP3 State Machine.
-     * State Machine Diagram:
-     * (Connection Est.)
-     * |
-     * v
-     * +------+------+
-     * | COMMAND MODE| <----qt-----+
-     * +------+------+             |
-     * | DATA Command              |
-     * v                           |
-     * +------+------+             |
-     * |  DATA MODE  |             |
-     * | (Read Body) |             |
-     * +------+------+             |
-     * | <CRLF>.<CRLF>             |
-     * v                           |
-     * [Process Email] ------------+
+     * Implements the POP3 State Machine with an inactivity timer.
      */
     @Override
     public void handle() throws IOException {
+        socket.setSoTimeout(MailSettings.SOCKET_READ_TIMEOUT_MS);
+        this.lastActivityTime = System.currentTimeMillis();
+        
         sendOk("POP3 server ready");
 
         String line;
-        while ((line = in.readLine()) != null) {
+        while (isRunning) {
+            try {
+                line = in.readLine();
+                if (line == null) {
+                    isRunning = false; 
+                    break;
+                }
+                lastActivityTime = System.currentTimeMillis(); 
+            
+            } catch (SocketTimeoutException e) {
+                if ((System.currentTimeMillis() - lastActivityTime) > MailSettings.POP3_TIMEOUT_MS) {
+                    System.out.println("[POP3Protocol.java: Client timed out due to inactivity.]");
+                    sendErr("Idle connection timed out");
+                    isRunning = false;
+                }
+                continue; // Continue loop to wait for next command or check timeout again
+            }
+
             String[] parts = line.split(" ", 2);
             String cmd = parts[0].toUpperCase();
             System.out.println("[POP3Protocol.java: C: " + line + "]");
@@ -59,13 +75,12 @@ public class POP3Protocol extends MailProtocol {
                         currentUser = parts[1];
                         sendOk("User accepted");
                     }
-
                     break;
 
                 case "PASS":
                     if (parts.length < 2) {
                         sendErr("Password required");
-                    } else if (MailStorageManager.authenticate(currentUser, parts[1], serverDomain)) {
+                    } else if (MailSettings.authenticate(currentUser, parts[1], serverDomain)) {
                         sendOk("Logged in");
                         messages = MailStorageManager.getMessages(currentUser, currentFolder);
                     } else {
@@ -100,10 +115,12 @@ public class POP3Protocol extends MailProtocol {
                     if (!isAuthenticated()) {
                         break;
                     }
+
                     if (parts.length < 2) {
                         sendErr("Missing argument");
                         break;
                     }
+
                     refreshMessageList();
                     handleRetr(parts[1]);
                     break;
@@ -112,10 +129,12 @@ public class POP3Protocol extends MailProtocol {
                     if (!isAuthenticated()) {
                         break;
                     }
+
                     if (parts.length < 2) {
                         sendErr("Missing argument");
                         break;
                     }
+                    
                     handleDele(parts[1]);
                     refreshMessageList();
                     break;
@@ -139,14 +158,15 @@ public class POP3Protocol extends MailProtocol {
                 case "QUIT":
                     processDeletions();
                     sendOk("Bye");
-                    close();
-                    return;
+                    isRunning = false; // Set flag to exit loop
+                    break;
 
                 default:
                     sendErr("Unknown command");
                     break;
             }
         }
+        close(); // Close the connection when the loop terminates
     }
 
     /**
@@ -190,6 +210,7 @@ public class POP3Protocol extends MailProtocol {
     */
     private void handleList(boolean isUID) {
         List<File> visibleMessages = getVisibleMessages();
+        sendOk((visibleMessages.size() + " messages"));
         StringBuilder response = new StringBuilder();
                     
         for (int i = 0; i < visibleMessages.size(); i++) {

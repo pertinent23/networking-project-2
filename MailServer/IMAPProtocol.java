@@ -1,5 +1,6 @@
 import java.io.*;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -21,6 +22,13 @@ public class IMAPProtocol extends MailProtocol {
     // regex to parse IMAP command lines
     private static final Pattern IMAP_CMD_PATTERN = Pattern.compile("^([^ ]+)\\s+([^ ]+)(?:\\s+(.*))?$");
 
+    //last time the client was active
+    private volatile long lastActivityTime;
+
+    //equal true while the server is running
+    private volatile boolean isRunning = true;
+
+
     public IMAPProtocol(Socket socket, String domain) throws IOException {
         super(socket, domain);
     }
@@ -32,12 +40,34 @@ public class IMAPProtocol extends MailProtocol {
      */
     @Override
     public void handle() throws IOException {
-        // Greeting with capabilities
-        out.print("* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE LITERAL+] IMAP4rev1 Service Ready\r\n");
+        socket.setSoTimeout(MailSettings.SOCKET_READ_TIMEOUT_MS);
+        this.lastActivityTime = System.currentTimeMillis();
+
+        out.print("* OK IMAP server ready\r\n");
         out.flush();
 
         String line;
-        while ((line = in.readLine()) != null) {
+        while (isRunning) {
+            try {
+                line = in.readLine();
+                if (line == null) {
+                    isRunning = false;
+                    break;
+                }
+                lastActivityTime = System.currentTimeMillis(); 
+
+            } catch (SocketTimeoutException e) {
+                long idleTime = System.currentTimeMillis() - lastActivityTime;
+                if (idleTime > MailSettings.IMAP_TIMEOUT_MS) {
+                    System.out.println("[IMAPProtocol.java: Client timed out due to inactivity.]");
+                    out.print("* BYE Idle connection timed out\r\n");
+                    out.flush();
+                    isRunning = false;
+                    close();
+                }
+                continue; // Continue loop to wait for next command or timeout check
+            }
+
             System.out.println("[IMAPProtocol.java: C: ".concat(line).concat("]")); 
 
             Matcher matcher = IMAP_CMD_PATTERN.matcher(line);
@@ -55,10 +85,18 @@ public class IMAPProtocol extends MailProtocol {
                         break;
 
                     case "NOOP":
+                    case "CHECK":
                         if (currentMailbox != null && currentUser != null) {
-                            checkNewMessages();
+                            if (cmd.equals("CHECK")) {
+                                // The CHECK command performs a checkpoint of the mailbox.
+                                // We will re-synchronize the in-memory message list with the storage.
+                                refreshCurrentMessages();
+                                out.print("* " + currentMessages.size() + " EXISTS\r\n");
+                            } else {
+                                checkNewMessages();
+                            }
                         }
-                        sendOk(tag, "NOOP completed");
+                        sendOk(tag, cmd + " completed");
                         break;
 
                     case "LOGIN":
@@ -68,7 +106,8 @@ public class IMAPProtocol extends MailProtocol {
                     case "LOGOUT":
                         out.print("* BYE Server logging out\r\n");
                         sendOk(tag, "LOGOUT completed");
-                        return;
+                        isRunning = false; // Stop the loop
+                        break;
 
                     case "LIST":
                     case "LSUB":
@@ -77,6 +116,10 @@ public class IMAPProtocol extends MailProtocol {
 
                     case "SELECT":
                         handleSelect(tag, args);
+                        break;
+                    
+                    case "STATUS":
+                        handleStatus(tag, args);
                         break;
 
                     case "CREATE":
@@ -130,14 +173,21 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
     */
     private void handleLogin(String tag, String args) {
-        if (args == null) { sendBad(tag, "Missing args"); return; }
+        if (args == null) { 
+            sendBad(tag, "Missing args"); 
+            return; 
+        }
         
-        String[] parts = args.split("\\s+");
-        // We have to remove the quotes around username and password
-        String user = parts[0].replace("\"", "");
-        String pass = parts.length > 1 ? parts[1].replace("\"", "") : "";
+        String[] parts = parseListArgs(args);
+        if (parts.length < 2 || parts[0].isEmpty()) {
+            sendBad(tag, "LOGIN requires a username and a password");
+            return;
+        }
 
-        if (MailStorageManager.authenticate(user, pass, serverDomain)) {
+        String user = parts[0];
+        String pass = parts[1];
+
+        if (MailSettings.authenticate(user, pass, serverDomain)) {
             currentUser = user;
             sendOk(tag, "LOGIN completed");
         } else {
@@ -192,20 +242,12 @@ public class IMAPProtocol extends MailProtocol {
                     if (matchesListPattern(name, pattern)) {
                         List<String> attributes = new ArrayList<>();
                         
-                        if (name.equalsIgnoreCase("INBOX")) {
-                            /**
-                             * INBOX cannot have subfolders in this simple implementation
-                             * but we can update this logic if needed.
-                            */
-                            attributes.add("\\HasNoChildren"); 
+                        boolean hasChildren = file != null && hasSubFolders(file);
+
+                        if (hasChildren) {
+                            attributes.add("\\HasChildren");
                         } else {
-                            // Check if this folder has sub-directories physically
-                            boolean hasChildren = file != null && hasSubFolders(file);
-                            if (hasChildren) {
-                                attributes.add("\\HasChildren");
-                            } else {
-                                attributes.add("\\HasNoChildren");
-                            }
+                            attributes.add("\\HasNoChildren");
                         }
 
                         // Escape quotes in folder name for safety
@@ -291,6 +333,9 @@ public class IMAPProtocol extends MailProtocol {
         String newName = parts[1];
 
         if (MailStorageManager.renameFolder(currentUser, oldName, newName)) {
+            if (oldName.equals(currentMailbox)) {
+                currentMailbox = newName;
+            }
             sendOk(tag, "RENAME completed");
         } else {
             sendNo(tag, "Rename failed");
@@ -574,10 +619,12 @@ public class IMAPProtocol extends MailProtocol {
             // Extract flags from within the parentheses
             int startParen = params.indexOf("(");
             int endParen = params.indexOf(")");
+
             if (startParen == -1 || endParen == -1) {
                 sendBad(tag, "Invalid flags format");
                 return;
             }
+
             String flagStr = params.substring(startParen + 1, endParen);
             List<String> newFlags = Arrays.asList(flagStr.split("\\s+"));
 
@@ -628,14 +675,16 @@ public class IMAPProtocol extends MailProtocol {
      * @param params
     */
     private void handleUidCopy(String tag, String params) {
-        // Use a more robust parser to separate the UID range from the destination mailbox.
-        Matcher m = Pattern.compile("([^\\s]+)\\s+\"?([^\"\\s]+)\"?").matcher(params);
-        if (!m.find()) {
+        // Use the robust parser to handle spaces in folder names.
+        String[] parts = parseListArgs(params);
+        
+        if (parts.length < 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
             sendBad(tag, "Invalid arguments for COPY");
             return;
         }
-        String range = m.group(1);
-        String destMailbox = m.group(2);
+
+        String range = parts[0];
+        String destMailbox = parts[1];
 
         if (destMailbox.isEmpty()) { 
             sendBad(tag, "Missing destination mailbox"); 
@@ -679,11 +728,91 @@ public class IMAPProtocol extends MailProtocol {
         out.flush();
     }
 
+
+    /**
+     * Handle STATUS command
+     * @param tag
+     * @param args
+    */
+    private void handleStatus(String tag, String args) {
+        if (currentUser == null) {
+            sendNo(tag, "Login first");
+            return;
+        }
+
+        Pattern statusPattern = Pattern.compile("\"?([^\"]+)\"?\\s+\\(([^\\)]+)\\)");
+        Matcher matcher = statusPattern.matcher(args);
+
+        if (!matcher.find()) {
+            sendBad(tag, "Invalid STATUS arguments");
+            return;
+        }
+
+        String mailboxName = matcher.group(1);
+        String[] requestedItems = matcher.group(2).toUpperCase().split("\\s+");
+
+        if (!mailboxName.equalsIgnoreCase("INBOX") && !MailStorageManager.folderExists(currentUser, mailboxName)) {
+            sendNo(tag, "Mailbox does not exist");
+            return;
+        }
+
+        StringBuilder statusResponse = new StringBuilder();
+        statusResponse.append("* STATUS ").append(mailboxName).append(" (");
+
+        List<String> statusItems = new ArrayList<>();
+        List<File> messages = MailStorageManager.getMessages(currentUser, mailboxName);
+
+        for (String item : requestedItems) {
+            switch (item) {
+                case "MESSAGES":
+                    statusItems.add("MESSAGES " + messages.size());
+                    break;
+
+                case "RECENT":
+                    long recentCount = messages.stream()
+                        .filter(msg -> MailStorageManager.getFlags(currentUser, mailboxName, getUidFromFile(msg)).contains("\\Recent"))
+                        .count();
+                    statusItems.add("RECENT " + recentCount);
+                    break;
+
+                case "UIDNEXT":
+                    // Note: getNextUID will increment the value. For a pure read, a "peek" method would be better.
+                    int uidNext = MailStorageManager.getNextUID(currentUser, mailboxName);
+                    statusItems.add("UIDNEXT " + uidNext);
+                    break;
+
+                case "UIDVALIDITY":
+                    String folderUidString = MailStorageManager.getFolderUID(currentUser, mailboxName);
+                    int uidValidity = Math.abs(folderUidString.hashCode());
+                    statusItems.add("UIDVALIDITY " + uidValidity);
+                    break;
+
+                case "UNSEEN":
+                    long unseenCount = messages.stream()
+                        .filter(msg -> !MailStorageManager.getFlags(currentUser, mailboxName, getUidFromFile(msg)).contains("\\Seen"))
+                        .count();
+                    statusItems.add("UNSEEN " + unseenCount);
+                    break;
+            }
+        }
+
+        statusResponse.append(String.join(" ", statusItems));
+        statusResponse.append(")\r\n");
+
+        out.print(statusResponse.toString());
+        out.flush();
+        sendOk(tag, "STATUS completed");
+    }
+
     /**
      * Handle EXPUNGE command
      * @param tag
     */
     private void handleExpunge() {
+        if (currentUser.isEmpty() || currentMailbox.isEmpty()) {
+            return;
+        }
+
         Iterator<File> it = currentMessages.iterator();
 
         int msn = 1;
@@ -879,8 +1008,13 @@ public class IMAPProtocol extends MailProtocol {
             }
         }
 
-        if (section.contains("HEADER")) return headerSb.toString();
-        if (section.contains("TEXT")) return bodySb.toString();
+        if (section.contains("HEADER")) {
+            return headerSb.toString();
+        }
+
+        if (section.contains("TEXT")) {
+            return bodySb.toString();
+        }
         
         // Fallback for unknown sections
         return "";
@@ -916,7 +1050,9 @@ public class IMAPProtocol extends MailProtocol {
      * @return
     */
     private String parseAddress(String raw) {
-        if (raw == null || raw.isEmpty()) return "NIL";
+        if (raw == null || raw.isEmpty()) {
+            return "NIL";
+        }
         
         String name = "NIL";
         String email = raw;
@@ -987,7 +1123,9 @@ public class IMAPProtocol extends MailProtocol {
      * @return true if matches, false otherwise
     */
     private boolean matchesListPattern(String name, String pattern) {
-        if (pattern.equals("*") || pattern.equals("%")) return true;
+        if (pattern.equals("*") || pattern.equals("%")) {
+            return true;
+        }
         
         // Exact match (INBOX is case-insensitive)
         if (name.equalsIgnoreCase("INBOX") && pattern.equalsIgnoreCase("INBOX")) {
@@ -1013,12 +1151,12 @@ public class IMAPProtocol extends MailProtocol {
     */
     private void listFoldersRecursively(File dir, String prefix, Map<String, File> result) {
         File[] files = dir.listFiles(File::isDirectory);
-        if (files == null) return;
+        
+        if (files == null) {
+            return;
+        }
 
         for (File f : files) {
-            if (f.getName().equalsIgnoreCase("INBOX")) 
-                continue;
-
             String imapName = prefix + f.getName();
             result.put(imapName, f);
 

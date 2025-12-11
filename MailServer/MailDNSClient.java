@@ -18,9 +18,14 @@ import java.util.Random;
 public class MailDNSClient {
     
     // --- CONSTANTS ---
+    // DNS Server Port
     private static final int DNS_PORT = 53;
+
+    // DNS Record Types
     private static final int TYPE_MX = 15;  // Mail Exchange Record Type
-    private static final int TYPE_A = 1;
+    private static final int TYPE_A = 1; // IPv4 Address Record Type
+
+    // DNS Class
     private static final int CLASS_IN = 1;  // Internet Class
     
     // Standard UDP DNS Packet Limit (RFC 1035).

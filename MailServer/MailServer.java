@@ -6,14 +6,12 @@ import java.util.concurrent.Executors;
 
 /**
  * MailServer Entry Point
- * <p>
+ * 
  * This class acts as the central hub for the mail server. It initializes the
  * multi-threaded environment and launches listener threads for each supported
  * protocol (SMTP, IMAP, POP3).
- * </p>
  *
- * <h3>Architecture Diagram:</h3>
- * <pre>
+ * Architecture Diagram:
  * +------------------+
  * |   MailServer     | <--- Entry Point (main)
  * +--------+---------+
@@ -34,7 +32,6 @@ import java.util.concurrent.Executors;
  * |
  * [MailClient Handler]
  * (Runs Protocol Logic)
- * </pre>
  */
 public class MailServer {
 
@@ -45,11 +42,9 @@ public class MailServer {
 
     /**
      * Shared Thread Pool for all protocols.
-     * <p>
-     * <b>Note on Concurrency:</b> We use a shared pool to limit the TOTAL resource
+     * Note on Concurrency: We use a shared pool to limit the TOTAL resource
      * consumption of the server. Whether a client is doing SMTP or IMAP, they
      * draw from the same pool of worker threads.
-     * </p>
      */
     private static ExecutorService threadPool;
     
