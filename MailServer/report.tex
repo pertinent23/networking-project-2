@@ -75,15 +75,34 @@ In the scenario where \texttt{dcd@gembloux.uliege.be} sends an email to \texttt{
     \item \textbf{Delivery:} The remote server (\texttt{info}) accepts the message and stores it locally via its own \texttt{MailStorageManager}.
 \end{enumerate}
 
-\section{Multi-thread coordination}
-To ensure robustness and scalability, we avoided creating a new thread for every single connection, which could lead to resource exhaustion (DoS). Instead, we utilized a \textbf{Thread Pool} pattern.
+\section{Concurrency Management: From a Global Lock to a Per-User Model}
+The first version of our server used a simple but problematic synchronization approach for the \texttt{MailStorageManager}. All methods manipulating files (like \texttt{saveEmail} or \texttt{getMessages}) were declared as \texttt{static synchronized}.
+
+\subsection{The Global Lock Problem}
+A lock on a static method acts as a global lock for the entire class. This meant that only one storage operation could occur at any given time across the whole server, regardless of the user involved. For example, if an IMAP session for \texttt{user1} was reading their messages, the delivery of a new email via SMTP for \texttt{user2} was blocked, waiting for the lock to be released. This approach, while safe, created a major bottleneck and severely limited the server's performance and scalability.
+
+\subsection{New Architecture: Fine-Grained Locking with \texttt{ReadWriteLock}}
+To solve this issue, we completely refactored the concurrency management by adopting a much more performant per-user locking model.
 
 \begin{itemize}
-    \item We used \texttt{java.util.concurrent.ExecutorService} with a fixed pool size (configurable via command line arguments, typically 10 threads).
-    \item When a socket is accepted, the job is submitted to the pool. If all threads are busy, the request waits in a queue.
+    \item \textbf{Creation of \texttt{MailboxLockManager}:} This new central class manages a \texttt{ConcurrentHashMap} that maps each username to a \texttt{java.util.concurrent.locks.ReadWriteLock} object. This type of lock is ideal for our use case:
+    \begin{itemize}
+        \item It allows an unlimited number of readers (\textbf{read locks}) to access a mailbox simultaneously, as they do not modify it.
+        \item It ensures that only one writer (\textbf{write lock}) can obtain a lock, and it blocks all other readers and writers while held.
+    \end{itemize}
+
+    \item \textbf{Overhaul of \texttt{MailStorageManager}:} The class is no longer static. An instance is now created for a specific user (e.g., \texttt{new MailStorageManager("user1")}). Each method now acquires the appropriate lock (read or write) via the \texttt{MailboxLockManager} before its execution and systematically releases it in a \texttt{finally} block, thereby ensuring the absence of deadlocks.
+
 \end{itemize}
 
-\textbf{Data Synchronization:} Since multiple threads (IMAP and SMTP) might access the same mailbox simultaneously, we synchronized critical sections in \texttt{MailStorageManager}. Methods modifying the file system or the metadata files (e.g., \texttt{saveEmail}, \texttt{updateFlag}, \texttt{getNextUID}) are marked with the \texttt{synchronized} keyword. This guarantees that file writes are atomic and prevents race conditions where two emails could receive the same UID.
+\subsection{Protocol Implications and Trade-offs}
+This new architecture has profound implications for the behavior of the protocols.
+
+\begin{itemize}
+    \item \textbf{Benefits for IMAP and SMTP:} The IMAP protocol, designed for concurrent access, benefits immensely from this change. Multiple clients for the same user can now read the mailbox simultaneously. Furthermore, email delivery via SMTP is never blocked by IMAP or POP3 reading activities anymore.
+
+    \item \textbf{Trade-off with the POP3 Standard:} The RFC 1939 for POP3 requires an \textbf{exclusive session-wide lock} to prevent any concurrent access. Our new model, which locks on a per-operation basis, no longer strictly adheres to this requirement. In return, it prevents a POP3 client from blocking the delivery of new emails, which is more desirable behavior in a modern server. We therefore made a pragmatic design choice that favors service availability over literal compliance with an older POP3 specification.
+\end{itemize}
 
 \section{Limits}
 While functional, our implementation has certain limitations:

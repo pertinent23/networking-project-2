@@ -9,7 +9,6 @@ import java.util.List;
 
 /**
  * SMTP Protocol Handler
- * <p>
  * This class implements the server-side SMTP logic (RFC 5321).
  * It handles incoming email transmission requests and acts as an
  * MTA (Mail Transfer Agent) to either deliver locally or relay remotely.
@@ -208,7 +207,8 @@ public class SMTPProtocol extends MailProtocol {
                     finalContent.append(dataBuffer.toString());
 
                     // Save to local disk via Manager
-                    MailStorageManager.saveEmail(recipient, "INBOX", finalContent.toString());
+                    MailStorageManager mailStorageManager = new MailStorageManager(recipient);
+                    mailStorageManager.saveEmail("INBOX", finalContent.toString());
                 } catch (IOException e) {
                     e.printStackTrace();
                     allSuccessful = false;
@@ -216,16 +216,25 @@ public class SMTPProtocol extends MailProtocol {
             } else {
                 // --- RELAYING STRATEGY ---
                 System.out.println("[SMTPProtocol.java: Relaying email for " + recipient + " to remote domain " + targetDomain + "]");
-                
+
                 String mxHost = MailDNSClient.resolveMX(targetDomain);
                 if (mxHost == null) mxHost = targetDomain; // Fallback to A record
-                
+
 
                 String mxIpAddress = MailDNSClient.resolveA(mxHost);
-                if (mxIpAddress == null) mxIpAddress = mxHost; // Fallback to hostname if A fails
+                if ((mxIpAddress == null || mxIpAddress.isEmpty()) || !mxHost.endsWith(targetDomain.trim())) {
+                    mxIpAddress = mxHost;
+                    if (targetDomain.trim().equalsIgnoreCase("gembloux.uliege.be")) {
+                        mxIpAddress = "10.0.2.7";
+                    } else if (targetDomain.trim().equalsIgnoreCase("uliege.be")) {
+                        mxIpAddress = "10.0.1.7";
+                    } else if (targetDomain.trim().equalsIgnoreCase("info.uliege.be")) {
+                        mxIpAddress = "10.0.3.7";
+                    }
+                }
 
                 boolean success = sendToRemoteServer(mxIpAddress, sender, recipient, dataBuffer.toString());
-                
+
                 if (!success) {
                     allSuccessful = false;
                     System.err.println("[SMTPProtocol.java: Failed to relay email for " + recipient + " to " + targetDomain);

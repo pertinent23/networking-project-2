@@ -13,6 +13,9 @@ public class IMAPProtocol extends MailProtocol {
     // Current user logged in
     private String currentUser = null;
 
+    // Mail storage manager for the current user
+    private MailStorageManager mailStorageManager = null;
+
     // The mailbox currently selected by the user
     private String currentMailbox = null;
     
@@ -167,6 +170,14 @@ public class IMAPProtocol extends MailProtocol {
         }
     }
 
+    private boolean isAuthenticated(String tag) {
+        if (currentUser == null || mailStorageManager == null) {
+            sendNo(tag, "Login first");
+            return false;
+        }
+        return true;
+    }
+
     /**
      * Handle LOGIN command
      * @param tag
@@ -189,6 +200,7 @@ public class IMAPProtocol extends MailProtocol {
 
         if (MailSettings.authenticate(user, pass, serverDomain)) {
             currentUser = user;
+            mailStorageManager = new MailStorageManager(currentUser);
             sendOk(tag, "LOGIN completed");
         } else {
             sendNo(tag, "Login failed");
@@ -202,10 +214,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
     */
     private void handleList(String tag, String args, boolean isLsub) {
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         // Parse arguments (Reference and Pattern) handling quotes
         String[] parts = parseListArgs(args);
@@ -220,7 +229,7 @@ public class IMAPProtocol extends MailProtocol {
         }
 
         try {
-            File userDir = MailStorageManager.getUserDirectory(currentUser);
+            File userDir = mailStorageManager.getUserDirectory();
             if (userDir != null && userDir.exists()) {
                 
                 // Map to store folder name -> File object (for attribute checking)
@@ -235,7 +244,7 @@ public class IMAPProtocol extends MailProtocol {
 
                 // Filter and send response using forEach
                 allFolders.forEach((name, file) -> {
-                    if (isLsub && !MailStorageManager.isSubscribed(currentUser, name)) {
+                    if (isLsub && !mailStorageManager.isSubscribed(name)) {
                         return;
                     }
 
@@ -272,14 +281,11 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
     */
     private void handleCreate(String tag, String args) {
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         String folder = args.replace("\"", "").trim();
         
-        if (MailStorageManager.createFolder(currentUser, folder)) {
+        if (mailStorageManager.createFolder(folder)) {
             sendOk(tag, "CREATE completed");
         } else {
             sendNo(tag, "Create failed");
@@ -292,10 +298,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
     */
     private void handleDelete(String tag, String args) {
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         String folder = args.replace("\"", "").trim();
         
@@ -303,7 +306,7 @@ public class IMAPProtocol extends MailProtocol {
             sendNo(tag, "Cannot delete INBOX");
             return;
         }
-        if (MailStorageManager.deleteFolder(currentUser, folder)) {
+        if (mailStorageManager.deleteFolder(folder)) {
             sendOk(tag, "DELETE completed");
         } else {
             sendNo(tag, "Delete failed");
@@ -316,10 +319,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
      */
     private void handleRename(String tag, String args) {
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         // Use the robust parser to handle spaces in folder names
         String[] parts = parseListArgs(args);
@@ -332,7 +332,7 @@ public class IMAPProtocol extends MailProtocol {
         String oldName = parts[0];
         String newName = parts[1];
 
-        if (MailStorageManager.renameFolder(currentUser, oldName, newName)) {
+        if (mailStorageManager.renameFolder(oldName, newName)) {
             if (oldName.equals(currentMailbox)) {
                 currentMailbox = newName;
             }
@@ -350,11 +350,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param subscribe
     */
     private void handleSubscribe(String tag, String args, boolean subscribe) {
-        // For simplicity, we accept the command but do not store subscriptions
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         if (args == null || args.isEmpty()) {
             sendBad(tag, "Missing mailbox name");
@@ -363,12 +359,12 @@ public class IMAPProtocol extends MailProtocol {
 
         String folder = args.replace("\"", "").trim();
 
-        if (!MailStorageManager.folderExists(currentUser, folder)) {
+        if (!mailStorageManager.folderExists(folder)) {
             sendNo(tag, "Mailbox does not exist");
             return;
         }
 
-        MailStorageManager.setSubscribed(currentUser, folder, subscribe);
+        mailStorageManager.setSubscribed(folder, subscribe);
 
         sendOk(tag, (subscribe ? "" : "UN").concat("SUBSCRIBE completed"));
     }
@@ -379,14 +375,11 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
     */
     private void handleSelect(String tag, String args) {
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         String mailboxName = args.replace("\"", "").trim();
 
-        if (!mailboxName.equalsIgnoreCase("INBOX") && !MailStorageManager.folderExists(currentUser, mailboxName)) {
+        if (!mailboxName.equalsIgnoreCase("INBOX") && !mailStorageManager.folderExists(mailboxName)) {
             sendNo(tag, "Mailbox does not exist");
             return;
         }
@@ -394,7 +387,7 @@ public class IMAPProtocol extends MailProtocol {
         currentMailbox = mailboxName;
 
         // 1. take the raw list of messages
-        List<File> rawList = MailStorageManager.getMessages(currentUser, currentMailbox);
+        List<File> rawList = mailStorageManager.getMessages(currentMailbox);
         
         // 2. make a mutable copy
         currentMessages = new ArrayList<>(rawList); 
@@ -403,7 +396,7 @@ public class IMAPProtocol extends MailProtocol {
         currentMessages.sort(Comparator.comparingInt(this::getUidFromFile));
 
         // Get the persistent UIDVALIDITY for this mailbox
-        String folderUidString = MailStorageManager.getFolderUID(currentUser, currentMailbox);
+        String folderUidString = mailStorageManager.getFolderUID(currentMailbox);
         int uidValidity = Math.abs(folderUidString.hashCode());
 
         int maxUid = currentMessages.stream().mapToInt(this::getUidFromFile).max().orElse(0);
@@ -411,7 +404,7 @@ public class IMAPProtocol extends MailProtocol {
 
         // Dynamically count messages with the \Recent flag
         long recentCount = currentMessages.stream()
-            .filter(msg -> MailStorageManager.getFlags(currentUser, currentMailbox, getUidFromFile(msg)).contains("\\Recent"))
+            .filter(msg -> mailStorageManager.getFlags(currentMailbox, getUidFromFile(msg)).contains("\\Recent"))
             .count();
 
         out.print("* " + currentMessages.size() + " EXISTS\r\n");
@@ -434,10 +427,7 @@ public class IMAPProtocol extends MailProtocol {
             return; 
         }
 
-        if (currentUser == null) { 
-            sendNo(tag, "Login first"); 
-            return; 
-        }
+        if (!isAuthenticated(tag)) return;
 
         String[] parts = args.split("\\s+", 2);
         String subCmd = parts[0].toUpperCase();
@@ -511,7 +501,7 @@ public class IMAPProtocol extends MailProtocol {
                 responseParts.add("UID " + uid);
 
                 if (fetchFlags) {
-                    List<String> flags = MailStorageManager.getFlags(currentUser, currentMailbox, uid);
+                    List<String> flags = mailStorageManager.getFlags(currentMailbox, uid);
                     responseParts.add("FLAGS (" + String.join(" ", flags) + ")");
                 }
 
@@ -540,9 +530,9 @@ public class IMAPProtocol extends MailProtocol {
 
                     // Logic to update \Seen flag (only if NOT PEEK)
                     if (!isPeek) {
-                        List<String> currentFlags = MailStorageManager.getFlags(currentUser, currentMailbox, uid);
+                        List<String> currentFlags = mailStorageManager.getFlags(currentMailbox, uid);
                         if (!currentFlags.contains("\\Seen")) {
-                            MailStorageManager.updateFlag(currentUser, currentMailbox, uid, "\\Seen", true);
+                            mailStorageManager.updateFlag(currentMailbox, uid, "\\Seen", true);
                         }
                     }
 
@@ -635,7 +625,7 @@ public class IMAPProtocol extends MailProtocol {
                 int uid = getUidFromFile(msg);
                 if(targetUids.contains(uid)) {
                     int msn = i + 1; // Correct MSN for the untagged response
-                    List<String> current = new ArrayList<>(MailStorageManager.getFlags(currentUser, currentMailbox, uid));
+                    List<String> current = new ArrayList<>(mailStorageManager.getFlags(currentMailbox, uid));
 
                     if (isSet) {
                         current.clear();
@@ -654,7 +644,7 @@ public class IMAPProtocol extends MailProtocol {
                         }
                     });
 
-                    MailStorageManager.setFlags(currentUser, currentMailbox, uid, String.join("|", current));
+                    mailStorageManager.setFlags(currentMailbox, uid, String.join("|", current));
                 
                     // if the client did not request silent mode, send untagged response
                     if (!params.toUpperCase().contains("SILENT")) {
@@ -692,7 +682,7 @@ public class IMAPProtocol extends MailProtocol {
         }
 
         // Destination mailbox must exist (INBOX is allowed)
-        if (!destMailbox.equalsIgnoreCase("INBOX") && !MailStorageManager.folderExists(currentUser, destMailbox)) {
+        if (!destMailbox.equalsIgnoreCase("INBOX") && !mailStorageManager.folderExists(destMailbox)) {
             // RFC says we should respond with: OK [TRYCREATE] Mailbox does not exist
             out.print(tag + " NO [TRYCREATE] Mailbox does not exist: " + destMailbox + "\r\n");
             out.flush();
@@ -706,8 +696,8 @@ public class IMAPProtocol extends MailProtocol {
             int uid = getUidFromFile(msgFile);
             if (targetUids.contains(uid)) {
                 try {
-                    int nextUid = MailStorageManager.getNextUID(currentUser, destMailbox);
-                    MailStorageManager.copyMessage(currentUser, msgFile, destMailbox, nextUid);
+                    int nextUid = mailStorageManager.getNextUID(destMailbox);
+                    mailStorageManager.copyMessage(msgFile, destMailbox, nextUid);
                     copiedUids.add(uid);
                 } catch (IOException e) {
                     e.printStackTrace();
@@ -735,10 +725,7 @@ public class IMAPProtocol extends MailProtocol {
      * @param args
     */
     private void handleStatus(String tag, String args) {
-        if (currentUser == null) {
-            sendNo(tag, "Login first");
-            return;
-        }
+        if (!isAuthenticated(tag)) return;
 
         Pattern statusPattern = Pattern.compile("\"?([^\"]+)\"?\\s+\\(([^\\)]+)\\)");
         Matcher matcher = statusPattern.matcher(args);
@@ -751,7 +738,7 @@ public class IMAPProtocol extends MailProtocol {
         String mailboxName = matcher.group(1);
         String[] requestedItems = matcher.group(2).toUpperCase().split("\\s+");
 
-        if (!mailboxName.equalsIgnoreCase("INBOX") && !MailStorageManager.folderExists(currentUser, mailboxName)) {
+        if (!mailboxName.equalsIgnoreCase("INBOX") && !mailStorageManager.folderExists(mailboxName)) {
             sendNo(tag, "Mailbox does not exist");
             return;
         }
@@ -760,7 +747,7 @@ public class IMAPProtocol extends MailProtocol {
         statusResponse.append("* STATUS ").append(mailboxName).append(" (");
 
         List<String> statusItems = new ArrayList<>();
-        List<File> messages = MailStorageManager.getMessages(currentUser, mailboxName);
+        List<File> messages = mailStorageManager.getMessages(mailboxName);
 
         for (String item : requestedItems) {
             switch (item) {
@@ -770,26 +757,26 @@ public class IMAPProtocol extends MailProtocol {
 
                 case "RECENT":
                     long recentCount = messages.stream()
-                        .filter(msg -> MailStorageManager.getFlags(currentUser, mailboxName, getUidFromFile(msg)).contains("\\Recent"))
+                        .filter(msg -> mailStorageManager.getFlags(mailboxName, getUidFromFile(msg)).contains("\\Recent"))
                         .count();
                     statusItems.add("RECENT " + recentCount);
                     break;
 
                 case "UIDNEXT":
                     // Note: getNextUID will increment the value. For a pure read, a "peek" method would be better.
-                    int uidNext = MailStorageManager.getNextUID(currentUser, mailboxName);
+                    int uidNext = mailStorageManager.getNextUID(mailboxName);
                     statusItems.add("UIDNEXT " + uidNext);
                     break;
 
                 case "UIDVALIDITY":
-                    String folderUidString = MailStorageManager.getFolderUID(currentUser, mailboxName);
+                    String folderUidString = mailStorageManager.getFolderUID(mailboxName);
                     int uidValidity = Math.abs(folderUidString.hashCode());
                     statusItems.add("UIDVALIDITY " + uidValidity);
                     break;
 
                 case "UNSEEN":
                     long unseenCount = messages.stream()
-                        .filter(msg -> !MailStorageManager.getFlags(currentUser, mailboxName, getUidFromFile(msg)).contains("\\Seen"))
+                        .filter(msg -> !mailStorageManager.getFlags(mailboxName, getUidFromFile(msg)).contains("\\Seen"))
                         .count();
                     statusItems.add("UNSEEN " + unseenCount);
                     break;
@@ -819,11 +806,11 @@ public class IMAPProtocol extends MailProtocol {
         while (it.hasNext()) {
             File file = it.next();
             int uid = getUidFromFile(file);
-            List<String> flags = MailStorageManager.getFlags(currentUser, currentMailbox, uid);
+            List<String> flags = mailStorageManager.getFlags(currentMailbox, uid);
             
             if (flags.contains("\\Deleted")) {
                 try {
-                    MailStorageManager.deleteMessageFile(file);
+                    mailStorageManager.deleteMessageFile(file);
                     // Also remove from metadata
                     new MailStorageManager.MetaDataManager(currentUser, currentMailbox).removeUID(uid);
                     it.remove();
@@ -842,7 +829,7 @@ public class IMAPProtocol extends MailProtocol {
      *
     */
     private void checkNewMessages() {
-        List<File> freshList = MailStorageManager.getMessages(currentUser, currentMailbox);
+        List<File> freshList = mailStorageManager.getMessages(currentMailbox);
         if (freshList.size() > currentMessages.size()) {
             out.print("* " + freshList.size() + " EXISTS\r\n");
             out.print("* " + (freshList.size() - currentMessages.size()) + " RECENT\r\n");
@@ -852,7 +839,7 @@ public class IMAPProtocol extends MailProtocol {
 
     // Reloads the message list for the current mailbox and sorts it by UID.
     private void refreshCurrentMessages() {
-        currentMessages = new ArrayList<>(MailStorageManager.getMessages(currentUser, currentMailbox));
+        currentMessages = new ArrayList<>(mailStorageManager.getMessages(currentMailbox));
         currentMessages.sort(Comparator.comparingInt(this::getUidFromFile));
     }
 

@@ -11,11 +11,14 @@ import java.util.List;
 /**
  * POP3 Protocol handler for mail server
  * Handles basic POP3 commands specified in the assignment
- *  
+ *
 */
 public class POP3Protocol extends MailProtocol {
     // Current user logged in
     private String currentUser = null;
+
+    // Mail storage manager for the current user
+    private MailStorageManager mailStorageManager = null;
 
     // list of messages in the current mailbox
     private List<File> messages = new ArrayList<>();
@@ -41,7 +44,7 @@ public class POP3Protocol extends MailProtocol {
     public void handle() throws IOException {
         socket.setSoTimeout(MailSettings.SOCKET_READ_TIMEOUT_MS);
         this.lastActivityTime = System.currentTimeMillis();
-        
+
         sendOk("POP3 server ready");
 
         String line;
@@ -49,11 +52,11 @@ public class POP3Protocol extends MailProtocol {
             try {
                 line = in.readLine();
                 if (line == null) {
-                    isRunning = false; 
+                    isRunning = false;
                     break;
                 }
-                lastActivityTime = System.currentTimeMillis(); 
-            
+                lastActivityTime = System.currentTimeMillis();
+
             } catch (SocketTimeoutException e) {
                 if ((System.currentTimeMillis() - lastActivityTime) > MailSettings.POP3_TIMEOUT_MS) {
                     System.out.println("[POP3Protocol.java: Client timed out due to inactivity.]");
@@ -82,7 +85,8 @@ public class POP3Protocol extends MailProtocol {
                         sendErr("Password required");
                     } else if (MailSettings.authenticate(currentUser, parts[1], serverDomain)) {
                         sendOk("Logged in");
-                        messages = MailStorageManager.getMessages(currentUser, currentFolder);
+                        mailStorageManager = new MailStorageManager(currentUser);
+                        messages = mailStorageManager.getMessages(currentFolder);
                     } else {
                         sendErr("Auth failed");
                         currentUser = null;
@@ -134,11 +138,11 @@ public class POP3Protocol extends MailProtocol {
                         sendErr("Missing argument");
                         break;
                     }
-                    
+
                     handleDele(parts[1]);
                     refreshMessageList();
                     break;
-                
+
                 case "RSET":
                     if (!isAuthenticated()) {
                         break;
@@ -146,7 +150,7 @@ public class POP3Protocol extends MailProtocol {
 
                     handleReset();
                     break;
-                
+
                 case "NOOP":
                     if (!isAuthenticated()) {
                         break;
@@ -174,7 +178,7 @@ public class POP3Protocol extends MailProtocol {
      * @return
     */
     private boolean isAuthenticated() {
-        if (currentUser == null) {
+        if (currentUser == null || mailStorageManager == null) {
             sendErr("Authenticate first");
             return false;
         }
@@ -186,7 +190,7 @@ public class POP3Protocol extends MailProtocol {
     */
     private void refreshMessageList() {
         if (currentUser != null) {
-            messages = MailStorageManager.getMessages(currentUser, currentFolder);
+            messages = mailStorageManager.getMessages(currentFolder);
         }
     }
 
@@ -212,7 +216,7 @@ public class POP3Protocol extends MailProtocol {
         List<File> visibleMessages = getVisibleMessages();
         sendOk((visibleMessages.size() + " messages"));
         StringBuilder response = new StringBuilder();
-                    
+
         for (int i = 0; i < visibleMessages.size(); i++) {
             File msg = visibleMessages.get(i);
             if (!isUID) {
@@ -254,7 +258,7 @@ public class POP3Protocol extends MailProtocol {
             }
 
             out.flush();
-            
+
         } catch (NumberFormatException e) {
             sendErr("Invalid message number");
         } catch (IndexOutOfBoundsException e) {
@@ -272,12 +276,12 @@ public class POP3Protocol extends MailProtocol {
             List<File> visibleMessages = getVisibleMessages();
             File message = visibleMessages.get(msgIndex);
 
-            List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, getUidFromFile(message));
+            List<String> flags = mailStorageManager.getFlags(currentFolder, getUidFromFile(message));
 
             if (flags.contains("\\Deleted")) {
                 sendErr("Message already deleted or invalid");
             } else {
-                MailStorageManager.updateFlag(currentUser, currentFolder, getUidFromFile(message), "\\Deleted", true);
+                mailStorageManager.updateFlag(currentFolder, getUidFromFile(message), "\\Deleted", true);
                 sendOk("Message marked for deletion");
             }
         } catch (NumberFormatException e) {
@@ -290,12 +294,12 @@ public class POP3Protocol extends MailProtocol {
     /**
      * If the user want to reset the deletion
      * before quit we can reset
-     * 
+     *
     */
     private void handleReset() {
         for (File message : messages) {
             if (isMarkedForDeletion(message)) {
-                MailStorageManager.updateFlag(currentUser, currentFolder, getUidFromFile(message), "\\Deleted", false);
+                mailStorageManager.updateFlag(currentFolder, getUidFromFile(message), "\\Deleted", false);
             }
         }
         sendOk("maildrop has " + messages.size() + " messages");
@@ -303,18 +307,18 @@ public class POP3Protocol extends MailProtocol {
 
     /**
      * Process deletions at QUIT command
-     * 
+     *
     */
     private void processDeletions() {
         if (currentUser == null) return;
-        
+
         // Use an iterator to safely remove while iterating if needed, though here we just delete files.
         Iterator<File> it = messages.iterator();
         while (it.hasNext()) {
             File message = it.next();
             if (isMarkedForDeletion(message)) {
                 try {
-                    MailStorageManager.deleteMessageFile(message);
+                    mailStorageManager.deleteMessageFile(message);
                 } catch (IOException e) {
                     System.err.println("[POP3Protocol.java: Failed to delete message: " + message.getName() + "]");
                 }
@@ -329,7 +333,7 @@ public class POP3Protocol extends MailProtocol {
     */
     private boolean isMarkedForDeletion(File message) {
         int uid = getUidFromFile(message);
-        List<String> flags = MailStorageManager.getFlags(currentUser, currentFolder, uid);
+        List<String> flags = mailStorageManager.getFlags(currentFolder, uid);
         return flags.contains("\\Deleted");
     }
 
@@ -348,7 +352,7 @@ public class POP3Protocol extends MailProtocol {
     }
 
     /**
-     * 
+     *
      * @param tag
      * @param msg
     */
@@ -358,7 +362,7 @@ public class POP3Protocol extends MailProtocol {
     }
 
     /**
-     * 
+     *
      * @param tag
      * @param msg
     */

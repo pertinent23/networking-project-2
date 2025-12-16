@@ -8,6 +8,13 @@ import java.util.Scanner;
 import java.util.UUID;
 
 public class MailStorageManager {
+
+    private final String username;
+
+    public MailStorageManager(String user) {
+        this.username = user.split("@")[0];
+    }
+
     /**
      * Metadata manager for user folders
      * to store flag and UID information
@@ -39,7 +46,7 @@ public class MailStorageManager {
                     .concat(File.separator)
                     .concat(username)
                     .concat(File.separator)
-                    .concat(foldername), 
+                    .concat(foldername),
             MailSettings.META_DATA_FILE);
 
             if (!path.exists()) {
@@ -273,111 +280,124 @@ public class MailStorageManager {
             }
         }
     }
-    
+
     /**
      * Store an email for a specific recipient.
-     * @param recipient
+     * @param foldername
      * @param content
      * @throws IOException
-    */
-    public static synchronized void saveEmail(String recipient, String foldername, String content) throws IOException {
-        String username = recipient.split("@")[0];
-        if (!MailSettings.USERS.containsKey(username)) 
-            return; // User not found
+     */
+    public void saveEmail(String foldername, String content) throws IOException {
+        MailboxLockManager.lockWrite(username);
+        try {
+            if (!MailSettings.USERS.containsKey(username))
+                return; // User not found
 
-        MetaDataManager meta = new MetaDataManager(username, foldername);
+            MetaDataManager meta = new MetaDataManager(username, foldername);
 
-        int lastUID = meta.getNextUID();
-        File inboxDir = new File(
-            MailSettings.STORAGE_BASE_DIR, username
-                .concat(File.separator)
-                .concat(foldername)
-        );
-        
-        if (!inboxDir.exists()) {
-            inboxDir.mkdirs();
+            int lastUID = meta.getNextUID();
+            File inboxDir = new File(
+                MailSettings.STORAGE_BASE_DIR, username
+                    .concat(File.separator)
+                    .concat(foldername)
+            );
+
+            if (!inboxDir.exists()) {
+                inboxDir.mkdirs();
+            }
+
+            String filename = lastUID + ".eml";
+            try (FileWriter writer = new FileWriter(new File(inboxDir, filename))) {
+                writer.write(content);
+            }
+            meta.addFlags(lastUID, "\\Recent"); // Initialize with no flags
+        } finally {
+            MailboxLockManager.unlockWrite(username);
         }
-        
-        String filename = lastUID + ".eml";
-        try (FileWriter writer = new FileWriter(new File(inboxDir, filename))) {
-            writer.write(content);
-        }
-        meta.addFlags(lastUID, "\\Recent"); // Initialize with no flags
     }
 
     /**
      * Get the directory for a specific user.
-     * @param user
      * @return
      * @throws IOException
-    */
-    public static synchronized File getUserDirectory(String user) throws IOException {
-        String username = user.split("@")[0];
-        File userDir = new File(MailSettings.STORAGE_BASE_DIR, username);
-        
-        if (!userDir.exists()) {
-            userDir.mkdirs();
-        }
+     */
+    public File getUserDirectory() throws IOException {
+        MailboxLockManager.lockRead(username);
+        try {
+            File userDir = new File(MailSettings.STORAGE_BASE_DIR, username);
 
-        return userDir;
+            if (!userDir.exists()) {
+                userDir.mkdirs();
+            }
+
+            return userDir;
+        } finally {
+            MailboxLockManager.unlockRead(username);
+        }
     }
 
     /**
      * Create a new folder for a specific user.
-     * 
-     * @param user
+     *
      * @param folderName
      * @return
-    */
-    public static synchronized boolean createFolder(String user, String folderName) {
-        String username = user.split("@")[0];
-        File folder = new File(
-            MailSettings.STORAGE_BASE_DIR
-                        .concat(File.separator)
-                        .concat(user.split("@")[0]), 
-        folderName);
-        
-        if (folder.exists()) {
-            return false; 
-        }
+     */
+    public boolean createFolder(String folderName) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            File folder = new File(
+                MailSettings.STORAGE_BASE_DIR
+                            .concat(File.separator)
+                            .concat(username),
+            folderName);
 
-        // Initialize metadata for the new folder
-        new MetaDataManager(username, folderName);
+            if (folder.exists()) {
+                return false;
+            }
 
-        if (folder.mkdirs() || folder.exists()) {
-            return true;
-        } else {
-            return false;
+            // Initialize metadata for the new folder
+            new MetaDataManager(username, folderName);
+
+            if (folder.mkdirs() || folder.exists()) {
+                return true;
+            } else {
+                return false;
+            }
+        } finally {
+            MailboxLockManager.unlockWrite(username);
         }
     }
 
     /**
      * Delete a folder for a specific user.
-     * @param user
      * @param folderName
      * @return
-    */
-    public static synchronized boolean deleteFolder(String user, String folderName) {
-        String username = user.split("@")[0];
-        File folder = new File(
-            MailSettings.STORAGE_BASE_DIR
-                .concat(File.separator)
-                .concat(username), 
-        folderName);
-        
-        if (!folder.exists() || !folder.isDirectory()) {
-            return false; 
-        }
+     */
+    public boolean deleteFolder(String folderName) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            File folder = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username),
+            folderName);
 
-        return deleteDirectory(folder);
+            if (!folder.exists() || !folder.isDirectory()) {
+                return false;
+            }
+
+            return deleteDirectory(folder);
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
      * Delete a directory recursively.
      * @param directoryToBeDeleted
      * @return
-    */
-    private static boolean deleteDirectory(File directoryToBeDeleted) {
+     */
+    private boolean deleteDirectory(File directoryToBeDeleted) {
         File[] allContents = directoryToBeDeleted.listFiles();
         if (allContents != null) {
             for (File file : allContents) {
@@ -389,261 +409,309 @@ public class MailStorageManager {
 
     /**
      * Rename a folder for a specific user.
-     *      
-     * @param user
+     *
      * @param oldName
      * @param newName
      * @return
-    */
-    public static synchronized boolean renameFolder(String user, String oldName, String newName) {
-        String username = user.split("@")[0];
-        File oldDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), oldName);
-        File newDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), newName);
-        
-        if (!oldDir.exists() || newDir.exists()) {
-            return false; 
+     */
+    public boolean renameFolder(String oldName, String newName) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            File oldDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), oldName);
+            File newDir = new File(MailSettings.STORAGE_BASE_DIR.concat(File.separator).concat(username), newName);
+
+            if (!oldDir.exists() || newDir.exists()) {
+                return false;
+            }
+
+            return oldDir.renameTo(newDir);
+        } finally {
+            MailboxLockManager.unlockWrite(username);
         }
-        
-        return oldDir.renameTo(newDir);
     }
 
     /**
      * Check if a folder exists for a specific user.
-     * @param user
      * @param folderName
      * @return
-    */
-    public static synchronized boolean folderExists(String user, String folderName) {
-        String username = user.split("@")[0];
-        File folder = new File(
-            MailSettings.STORAGE_BASE_DIR
-                .concat(File.separator)
-                .concat(username), 
-        folderName);
-        return folder.exists() && folder.isDirectory();
+     */
+    public boolean folderExists(String folderName) {
+        MailboxLockManager.lockRead(username);
+        try {
+            File folder = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username),
+            folderName);
+            return folder.exists() && folder.isDirectory();
+        } finally {
+            MailboxLockManager.unlockRead(username);
+        }
     }
 
     /**
      * Retrieve all messages for a specific user.
-     * @param user
+     * @param folderName
      * @return
      */
-    public static synchronized List<File> getMessages(String user, String folderName) {
-        String username = user.split("@")[0];
-        File inboxDir = new File(
-            MailSettings.STORAGE_BASE_DIR
-                .concat(File.separator)
-                .concat(username), 
-        folderName);
+    public List<File> getMessages(String folderName) {
+        MailboxLockManager.lockRead(username);
+        try {
+            File inboxDir = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username),
+            folderName);
 
-        if (!inboxDir.exists()) {
-            return new LinkedList<>();
+            if (!inboxDir.exists()) {
+                return new LinkedList<>();
+            }
+
+            File[] files = inboxDir.listFiles((dir, name) -> name.endsWith(".eml"));
+            return files != null ? List.of(files) : new LinkedList<>();
+        } finally {
+            MailboxLockManager.unlockRead(username);
         }
-
-        File[] files = inboxDir.listFiles((dir, name) -> name.endsWith(".eml"));
-        return files != null ? List.of(files) : new LinkedList<>();
     }
-    
+
     /**
      * Retrieve a specific message file for a user.
-     * @param user
      * @param folderName
      * @param uid
      * @return
-    */
-    public static synchronized File getMessageFile(String user, String folderName, int uid) {
-        String username = user.split("@")[0];
-        File file = new File(
-            MailSettings.STORAGE_BASE_DIR
-                .concat(File.separator)
-                .concat(username)
-                .concat(File.separator)
-                .concat(folderName), 
-        uid + ".eml");
+     */
+    public File getMessageFile(String folderName, int uid) {
+        MailboxLockManager.lockRead(username);
+        try {
+            File file = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username)
+                    .concat(File.separator)
+                    .concat(folderName),
+            uid + ".eml");
 
-        if (file.exists()) {
-            return file;
+            if (file.exists()) {
+                return file;
+            }
+
+            return null;
+        } finally {
+            MailboxLockManager.unlockRead(username);
         }
-
-        return null;
     }
 
     /**
      * Get the message count for a specific user.
-     * @param user
      * @param folderName
      * @return
-    */
-    public static synchronized int getMessageCount(String user, String folderName) {
-        String username = user.split("@")[0];
-        File inboxDir = new File(
-            MailSettings.STORAGE_BASE_DIR
-                .concat(File.separator)
-                .concat(username), 
-        folderName);
+     */
+    public int getMessageCount(String folderName) {
+        MailboxLockManager.lockRead(username);
+        try {
+            File inboxDir = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username),
+            folderName);
 
-        if (!inboxDir.exists()) {
-            return 0;
+            if (!inboxDir.exists()) {
+                return 0;
+            }
+
+            File[] files = inboxDir.listFiles((dir, name) -> name.endsWith(".eml"));
+            return files != null ? files.length : 0;
+        } finally {
+            MailboxLockManager.unlockRead(username);
         }
-
-        File[] files = inboxDir.listFiles((dir, name) -> name.endsWith(".eml"));
-        return files != null ? files.length : 0;
     }
 
     /**
      * Delete a specific message for a user.
-     * @param user
+     * @param folderName
      * @param filename
      * @throws IOException
      */
-    public static synchronized void deleteMessage(String user, String folderName, String filename) throws IOException {
-        String username = user.split("@")[0];
-        File file = new File(
-            MailSettings.STORAGE_BASE_DIR
-                .concat(File.separator)
-                .concat(username)
-                .concat(File.separator)
-                .concat(folderName), 
-        filename);
-        
-        if (file.exists()) {
-            file.delete();
-        }
+    public void deleteMessage(String folderName, String filename) throws IOException {
+        MailboxLockManager.lockWrite(username);
+        try {
+            File file = new File(
+                MailSettings.STORAGE_BASE_DIR
+                    .concat(File.separator)
+                    .concat(username)
+                    .concat(File.separator)
+                    .concat(folderName),
+            filename);
 
-        new MetaDataManager(username, folderName).updateFlag(Integer.parseInt(filename.split("\\.")[0]), "\\Deleted", true);
+            if (file.exists()) {
+                file.delete();
+            }
+
+            new MetaDataManager(username, folderName).updateFlag(Integer.parseInt(filename.split("\\.")[0]), "\\Deleted", true);
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
      * Delete a message file.
      * @param file
      * @throws IOException
-    */
-    public static synchronized void deleteMessageFile(File file) throws IOException {
-        if (file != null && file.exists()) {
-            file.delete();
+     */
+    public void deleteMessageFile(File file) throws IOException {
+        MailboxLockManager.lockWrite(username);
+        try {
+            if (file != null && file.exists()) {
+                file.delete();
+            }
+        } finally {
+            MailboxLockManager.unlockWrite(username);
         }
     }
 
     /**
      * Copy a message to a target folder for a user.
-     * @param user
      * @param messageFile
      * @param targetFolder
-     * @param newName
+     * @param uid
      * @throws IOException
-    */
-    public static synchronized void copyMessage(String user, File messageFile, String targetFolder, int uid) throws IOException {
-        String username = user.split("@")[0];
-        File targetDir = new File(
-            MailSettings.STORAGE_BASE_DIR
-                        .concat(File.separator)
-                        .concat(username), 
-            targetFolder);
-        
-        if (!targetDir.exists()) {
-            targetDir.mkdirs();
-        }
+     */
+    public void copyMessage(File messageFile, String targetFolder, int uid) throws IOException {
+        MailboxLockManager.lockWrite(username);
+        try {
+            File targetDir = new File(
+                MailSettings.STORAGE_BASE_DIR
+                            .concat(File.separator)
+                            .concat(username),
+                targetFolder);
 
-        File targetFile = new File(targetDir, ("" + uid).concat(".eml"));
-
-        try (java.io.InputStream in = new java.io.FileInputStream(messageFile);
-             java.io.OutputStream out = new java.io.FileOutputStream(targetFile)) {
-            byte[] buffer = new byte[1024];
-            int length;
-            while ((length = in.read(buffer)) > 0) {
-                out.write(buffer, 0, length);
+            if (!targetDir.exists()) {
+                targetDir.mkdirs();
             }
-        }
 
-        new MetaDataManager(username, targetFolder).addFlags(uid, "\\Seen");
+            File targetFile = new File(targetDir, ("" + uid).concat(".eml"));
+
+            try (java.io.InputStream in = new java.io.FileInputStream(messageFile);
+                 java.io.OutputStream out = new java.io.FileOutputStream(targetFile)) {
+                byte[] buffer = new byte[1024];
+                int length;
+                while ((length = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, length);
+                }
+            }
+
+            new MetaDataManager(username, targetFolder).addFlags(uid, "\\Seen");
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
      * Get flags for a specific message UID.
-     * @param user
      * @param folderName
      * @param uid
      * @return
-    */
-    public static List<String> getFlags(String user, String folderName, int uid) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        return meta.getFlags(uid);
+     */
+    public List<String> getFlags(String folderName, int uid) {
+        MailboxLockManager.lockRead(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            return meta.getFlags(uid);
+        } finally {
+            MailboxLockManager.unlockRead(username);
+        }
     }
-
 
     /**
      * Get the folder UID.
-     * @param user
      * @param folderName
      * @return
-    */
-    public static String getFolderUID(String user, String folderName) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        return meta.getFolderUID();
+     */
+    public String getFolderUID(String folderName) {
+        MailboxLockManager.lockRead(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            return meta.getFolderUID();
+        } finally {
+            MailboxLockManager.unlockRead(username);
+        }
     }
 
     /**
      * Get the next UID for a specific folder.
-     * @param user
      * @param folderName
      * @return
-    */
-    public static int getNextUID(String user, String folderName) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        return meta.getNextUID();
+     */
+    public int getNextUID(String folderName) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            return meta.getNextUID();
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
      * Update a specific flag for a message UID.
-     * @param user
      * @param folderName
      * @param uid
      * @param flag
      * @param add
-    */
-    public static void updateFlag(String user, String folderName, int uid, String flag, boolean add) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        meta.updateFlag(uid, flag, add);
+     */
+    public void updateFlag(String folderName, int uid, String flag, boolean add) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            meta.updateFlag(uid, flag, add);
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
-     * 
-     * @param user
+     *
      * @param folderName
      * @param uid
      * @param flags
-    */
-    public static void setFlags(String user, String folderName, int uid, String flags) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        meta.setFlags(uid, flags);
+     */
+    public void setFlags(String folderName, int uid, String flags) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            meta.setFlags(uid, flags);
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
      * Set subscription status for a folder.
-     * @param user
      * @param folderName
      * @param subscribed
-    */
-    public static void setSubscribed(String user, String folderName, boolean subscribed) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        meta.setSubscribed(subscribed);
+     */
+    public void setSubscribed(String folderName, boolean subscribed) {
+        MailboxLockManager.lockWrite(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            meta.setSubscribed(subscribed);
+        } finally {
+            MailboxLockManager.unlockWrite(username);
+        }
     }
 
     /**
      * Check if a folder is subscribed.
-     * @param user
      * @param folderName
      * @return
-    */
-    public static boolean isSubscribed(String user, String folderName) {
-        String username = user.split("@")[0];
-        MetaDataManager meta = new MetaDataManager(username, folderName);
-        return meta.isSubscribed();
+     */
+    public boolean isSubscribed(String folderName) {
+        MailboxLockManager.lockRead(username);
+        try {
+            MetaDataManager meta = new MetaDataManager(username, folderName);
+            return meta.isSubscribed();
+        } finally {
+            MailboxLockManager.unlockRead(username);
+        }
     }
 }
