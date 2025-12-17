@@ -124,7 +124,7 @@ While functional, our implementation has certain limitations:
 \section{Conclusion}
 This project was a challenging but rewarding deep dive into application-layer protocols. The most difficult part was implementing the \textbf{$MailDNSClient$}.
 Manually constructing binary packets and handling DNS compression pointers required a precise understanding of bits and bytes, which we learned to manage effectively using Java's streams and bitwise operators. 
-We heavily relied on online resources to understand the packet structure, notably an article on "DNS Request and Response in Java"[cite: 1]. 
+We heavily relied on online resources to understand the packet structure, notably an article on "DNS Request and Response in Java". 
 
 We also learned how to manage state in stateful protocols like SMTP and IMAP versus the stateless nature of HTTP. Implementing the synchronization logic for the shared file storage taught us the practical importance of thread safety in concurrent systems.
 
